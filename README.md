@@ -54,6 +54,6 @@ python3 -m venv .venv
 
 默认测试不访问抖音：运行真实 Chromium、测试 HTTP 服务和 FFmpeg，使用合成页面及新生成媒体。测试环境需允许浏览器进程和回环网络连接。
 
-此前 Codex 内置浏览器成功下载不算本程序真实下载成功。独立真实实验结果见 `docs/validation/`；有界面、无头、Linux 云网络分别验证。
+此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[2026-10-13 独立 P0 报告](docs/validation/2026-10-13-independent-p0.md)：当前网络返回 `198.18.0.x` 非公网目的地址，两条授权样本均在页面请求前失败；真实下载尚未复现。有界面、无头、Linux 云网络分别验证。
 
 本阶段自行实现内核，没有复制 Resker666/douyin-downloader 的业务代码。来源范围与设计见 `docs/superpowers/specs/`。

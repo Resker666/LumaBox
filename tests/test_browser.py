@@ -84,3 +84,19 @@ async def test_absent_resources_have_bounded_wait(monkeypatch):
         await session.context.route("**/*", lambda route: route.fulfill(status=200, body="<body>loading</body>"))
         with pytest.raises(LumaBoxError, match="UNSUPPORTED_MEDIA"):
             await session.load(parse_input("https://www.douyin.com/video/7686430330920075249"))
+
+
+async def test_cdp_checks_real_redirect_before_unallowed_navigation(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    original = BrowserSession._document
+    async def redirect_first(self, event):
+        if event["request"]["url"].startswith("https://www.douyin.com/video/"):
+            self.guard.check(event["request"]["url"], None, event["requestId"])
+            await self.cdp.send("Fetch.fulfillRequest", {"requestId": event["requestId"], "responseCode": 302,
+                "responseHeaders": [{"name": "Location", "value": "https://evil.test/private"}, {"name": "Content-Length", "value": "0"}]})
+        else:
+            await original(self, event)
+    monkeypatch.setattr(BrowserSession, "_document", redirect_first)
+    async with BrowserSession(headless=True) as session:
+        with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
+            await session.load(parse_input("https://www.douyin.com/video/7686430330920075249"))

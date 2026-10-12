@@ -42,7 +42,7 @@
 - `src/lumabox/transfer.py`、`verify.py`：流式下载、容量限制、完整解码及结果元数据。
 - `src/lumabox/runner.py`、`cli.py`、`__main__.py`：原子发布、失败报告、退出状态和 CLI。
 - `tests/`：单元测试、合成 DOM/本地网络夹具和完整 CLI 测试。生产配置没有跳过安全校验的测试开关。
-- `README.md`、`docs/validation/2026-10-12-independent-p0.md`：安装/运行说明和独立实验实际结果。
+- `README.md`、`docs/validation/2026-10-13-independent-p0.md`：安装/运行说明和独立实验实际结果。
 
 ### Task 1: 输入规则、包和公共契约
 
@@ -134,7 +134,7 @@
 
 ### Task 6: 独立 P0 实验与交付
 
-**Files:** 创建 `tests/test_end_to_end.py`、`docs/validation/2026-10-12-independent-p0.md`；更新 README 和此计划执行状态。真实媒体存 `Downloaded/`，不进 Git。
+**Files:** 创建 `tests/test_end_to_end.py`、`docs/validation/2026-10-13-independent-p0.md`；更新 README 和此计划执行状态。真实媒体存 `Downloaded/`，不进 Git。
 
 **Interfaces:** 使用正式 CLI 和真实工具；实验不使用 Codex 浏览器下载能力、不复用此前成功媒体。
 
@@ -150,4 +150,4 @@
 
 技术依据：[Playwright 网络与代理](https://playwright.dev/python/docs/network)、[Chromium Fetch 文档请求拦截](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/)、[Playwright CDP 会话](https://playwright.dev/python/docs/api/class-browsercontext#browser-context-new-cdp-session)。特别注意官方网络文档说明浏览器重定向不会重新触发同一 route，地址校验不能只放在 route 回调里。
 
-执行方式：在当前新仓库由本会话直接实施，任务末尾跑完整测试并提交，最终做一次独立代码审查。设计已由用户“继续执行”确认；本计划等待书面复核后开始实施。
+执行方式：在当前新仓库由本会话直接实施，任务末尾跑完整测试并提交，最终做一次独立代码审查。用户已确认设计及计划并指示“执行”；2026-10-12/13 已实现独立 CLI。真实 P0 因系统 DNS 返回非公网目的地址未通过，保留诊断和复测命令，未进入网站阶段。
