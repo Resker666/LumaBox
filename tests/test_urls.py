@@ -1,7 +1,7 @@
 import pytest
 
 from lumabox.errors import LumaBoxError
-from lumabox.urls import parse_input, validate_media_url, validate_page_url
+from lumabox.urls import parse_input, validate_media_url, validate_page_url, page_identity
 
 VID = "7686430330920075249"
 
@@ -51,3 +51,9 @@ def test_observed_media_roots(url):
 def test_media_rejects_unobserved_targets(url):
     with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
         validate_media_url(url)
+
+
+def test_observed_modal_page_identity_is_internal_only():
+    assert page_identity(f"https://www.douyin.com/jingxuan?modal_id={VID}") == (VID, "video")
+    with pytest.raises(LumaBoxError, match="INVALID_INPUT"):
+        parse_input(f"https://www.douyin.com/jingxuan?modal_id={VID}")

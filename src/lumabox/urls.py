@@ -1,5 +1,5 @@
 import re
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, parse_qs
 
 from .errors import LumaBoxError
 from .models import InputLink
@@ -43,6 +43,10 @@ def page_identity(url: str) -> tuple[str, str] | None:
     validate_page_url(url)
     match = WORK_PATH.fullmatch(urlsplit(url).path)
     if not match:
+        parts = urlsplit(url)
+        modal = parse_qs(parts.query).get("modal_id", [])
+        if parts.path == "/jingxuan" and len(modal) == 1 and re.fullmatch(r"\d{15,20}", modal[0]):
+            return modal[0], "video"
         return None
     return match[2], "video" if match[1] == "video" else "gallery"
 
@@ -56,7 +60,7 @@ def parse_input(text: str) -> InputLink:
     if parts.hostname not in PAGE_HOSTS:
         raise LumaBoxError("INVALID_INPUT", "Unsupported page host")
     identity = page_identity(url)
-    if identity:
+    if identity and WORK_PATH.fullmatch(parts.path):
         return InputLink(url, *identity)
     if parts.hostname == "v.douyin.com" and re.fullmatch(r"/[A-Za-z0-9_-]+/?", parts.path):
         return InputLink(url, None, None)

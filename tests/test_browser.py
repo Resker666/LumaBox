@@ -1,0 +1,86 @@
+from pathlib import Path
+
+import pytest
+from playwright.async_api import async_playwright
+from lumabox.browser import BrowserSession, NavigationGuard
+from lumabox.errors import LumaBoxError
+from lumabox.extract import DOM_SNAPSHOT, extract_work, detect_access
+from lumabox.urls import parse_input
+import lumabox.browser as browser_module
+
+
+def test_every_document_hop_is_checked():
+    guard = NavigationGuard()
+    for index in range(6):
+        guard.check(f"https://v.douyin.com/hop{index}", str(index - 1) if index else None)
+    with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
+        guard.check("https://v.douyin.com/hop6", "5")
+    with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
+        NavigationGuard().check("https://evil.test/path", None)
+
+
+@pytest.mark.parametrize("text,media,code", [("请完成下方验证", True, "CHALLENGE_REQUIRED"), ("请先登录后观看", False, "AUTH_REQUIRED"), ("登录后免费畅享高清视频", True, None)])
+def test_access_states(text, media, code):
+    if code:
+        with pytest.raises(LumaBoxError, match=code):
+            detect_access(text, media)
+    else:
+        detect_access(text, media)
+
+
+async def test_real_dom_ignores_recommendations_and_backgrounds():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.route("**/*", lambda route: route.abort())
+            await page.set_content(Path("tests/fixtures/gallery.html").read_text(encoding="utf-8"))
+            snapshot = await page.evaluate(DOM_SNAPSHOT, {"work_id": "7695689642767235187", "kind": "gallery"})
+            work = extract_work(snapshot, "7695689642767235187")
+            assert [r.url for r in work.resources] == ["https://p3.douyinpic.com/a.jpeg", "https://p3.douyinpic.com/b.jpeg"]
+        finally:
+            await browser.close()
+
+
+@pytest.mark.parametrize("status,code", [(401, "AUTH_REQUIRED"), (403, "BLOCKED"), (429, "RATE_LIMITED")])
+async def test_session_stops_on_document_access_failure(monkeypatch, status, code):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    async with BrowserSession(headless=True) as session:
+        await session.context.route("**/*", lambda route: route.fulfill(status=status, body="access denied"))
+        with pytest.raises(LumaBoxError, match=code):
+            await session.load(parse_input("https://www.douyin.com/note/7695689642767235187"))
+
+
+async def test_session_extracts_fixture_and_closes_context(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    html = Path("tests/fixtures/gallery.html").read_text(encoding="utf-8")
+    async with BrowserSession(headless=True) as session:
+        async def serve(route):
+            if route.request.resource_type == "document":
+                await route.fulfill(status=200, content_type="text/html", body=html)
+            else:
+                await route.abort()
+        await session.context.route("**/*", serve)
+        work = await session.load(parse_input("https://www.douyin.com/note/7695689642767235187"))
+        assert len(work.resources) == 2
+        assert session.http_status == 200
+    assert not session.browser.is_connected()
+
+
+async def test_session_waits_for_blob_to_become_normal_url(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    html = '''<div data-e2e="feed-active-video" data-e2e-vid="7686430330920075249" style="width:300px;height:200px"><div class="basePlayerContainer"><video src="blob:fixture"></video></div></div>
+    <script>setTimeout(()=>{document.querySelector('video').src='https://v1.douyinvod.com/a.mp4'},300)</script>'''
+    async with BrowserSession(headless=True) as session:
+        await session.context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=html) if route.request.resource_type == "document" else route.abort())
+        work = await session.load(parse_input("https://www.douyin.com/video/7686430330920075249"))
+        assert work.resources[0].url == "https://v1.douyinvod.com/a.mp4"
+
+
+async def test_absent_resources_have_bounded_wait(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    monkeypatch.setattr(browser_module, "RESOURCE_WAIT", 0.1)
+    async with BrowserSession(headless=True) as session:
+        await session.context.route("**/*", lambda route: route.fulfill(status=200, body="<body>loading</body>"))
+        with pytest.raises(LumaBoxError, match="UNSUPPORTED_MEDIA"):
+            await session.load(parse_input("https://www.douyin.com/video/7686430330920075249"))
