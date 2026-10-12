@@ -1,4 +1,4 @@
-# douyin-media：独立浏览器下载内核设计
+# LumaBox · 光匣：独立浏览器下载内核设计
 
 日期：2026-10-12（Asia/Shanghai）
 
@@ -6,7 +6,9 @@
 
 新建精简仓库，不在 Resker666/douyin-downloader 的完整架构上继续开发。原项目保留为源码及边界情况参考。最终用途沿用原任务书：个人使用的 Linux 下载网站，输入抖音链接，下载授权的视频或一条图文作品的图片集合。
 
-当前阶段只交付独立下载内核与命令行。网页、API、鉴权、队列、清理及 Docker 部署放在内核真实实验通过后的独立阶段。仓库本地路径为 `E:\develop\douyin-downloader\douyin-media`；不创建远程仓库、不推送、不部署。
+项目名称为 **LumaBox · 光匣**，仓库目录、Python 包及命令行入口统一使用 `lumabox`。
+
+当前阶段只交付独立下载内核与命令行。网页、API、鉴权、队列、清理及 Docker 部署放在内核真实实验通过后的独立阶段。仓库本地路径为 `E:\develop\douyin-downloader\lumabox`；不创建远程仓库、不推送、不部署。
 
 ## 已有证据与未解决的问题
 
