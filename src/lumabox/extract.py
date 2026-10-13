@@ -7,17 +7,41 @@ from .urls import validate_media_url
 # Based on observed Douyin detail DOM on 2026-10-12/13. No application state is read.
 DOM_SNAPSHOT = r"""({work_id, kind}) => {
  const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
- const candidates = kind === 'gallery'
-   ? Array.from(document.querySelectorAll('.note-detail-container[data-e2e="player-container"]'))
-       .filter(e => e.closest('[data-e2e="feed-active-video"][data-e2e-vid]')?.getAttribute('data-e2e-vid') === work_id)
-   : Array.from(document.querySelectorAll('[data-e2e="feed-active-video"][data-e2e-vid]'))
-       .filter(e => e.getAttribute('data-e2e-vid') === work_id);
- const roots = candidates.filter(visible);
- const root = roots.length === 1 ? roots[0] : null;
+ const feedSelector = '[data-e2e="feed-active-video"][data-e2e-vid]';
+ const detailSelector = kind === 'gallery'
+   ? '.note-detail-container[data-e2e="player-container"]'
+   : '.video-detail-container[data-e2e="player-container"]';
+ const mainSelector = kind === 'gallery' ? '[data-e2e="note-detail"]' : '[data-e2e="video-detail"]';
+ const detailIdentity = root => {
+   const main = root.closest(mainSelector);
+   if (!visible(main) || Array.from(document.querySelectorAll(mainSelector)).filter(visible).length !== 1 ||
+       Array.from(main.querySelectorAll(detailSelector)).filter(visible).length !== 1) return null;
+   if (kind === 'video') {
+     const ids = Array.from(root.classList).filter(c => /^video_\d+$/.test(c)).map(c => c.slice(6));
+     return ids.length === 1 ? {id: ids[0], source: 'video_class'} : null;
+   }
+   const sidebars = Array.from(main.querySelectorAll('.noteSideBarContainer')).filter(visible);
+   const active = sidebars.length === 1 ? Array.from(sidebars[0].querySelectorAll(feedSelector)).filter(visible) : [];
+   return active.length === 1 ? {id: active[0].getAttribute('data-e2e-vid'), source: 'note_sidebar'} : null;
+ };
+ const candidates = [];
+ for (const root of Array.from(document.querySelectorAll(detailSelector)).filter(visible)) {
+   const owner = root.closest(feedSelector);
+   const identity = owner ? {id: owner.getAttribute('data-e2e-vid'), source: 'feed'} : detailIdentity(root);
+   if (identity?.id === work_id && (kind === 'gallery' || !owner)) candidates.push({root, ...identity});
+ }
+ if (kind === 'video') {
+   for (const root of Array.from(document.querySelectorAll(feedSelector)).filter(visible)) {
+     const id = root.getAttribute('data-e2e-vid');
+     if (id === work_id) candidates.push({root, id, source: 'feed'});
+   }
+ }
+ const candidate = candidates.length === 1 ? candidates[0] : null;
+ const root = candidate?.root;
  const players = root ? Array.from(root.querySelectorAll('.basePlayerContainer')) : [];
  const player = players.length === 1 ? players[0] : null;
- const owner = root?.closest('[data-e2e="feed-active-video"][data-e2e-vid]');
- const out = {work_id: owner?.getAttribute('data-e2e-vid') || null, kind, scope_confirmed: !!player, count: 0, resources: [], text: (document.body?.innerText || '').slice(0, 20000)};
+ const out = {work_id: candidate?.id || null, identity_source: candidate?.source || null,
+   kind, scope_confirmed: !!player, count: 0, resources: [], text: (document.body?.innerText || '').slice(0, 20000)};
  if (!player) return out;
  if (kind === 'video') {
    const videos = Array.from(player.querySelectorAll('video'));
@@ -59,9 +83,10 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
 
 
 def detect_access(text: str, has_media: bool) -> None:
+    text = re.sub(r"\s+", "", text)
     if re.search(r"请完成下方验证|拖动滑块|安全验证|验证你是人类|操作过于频繁", text):
         raise LumaBoxError("CHALLENGE_REQUIRED", "Complete the site's access requirements manually")
-    if not has_media and re.search(r"请先登录后|登录后才能(?:观看|访问)", text):
+    if not has_media and re.search(r"请先登录后(?:观看|访问)|登录后才能(?:观看|访问)", text):
         raise LumaBoxError("AUTH_REQUIRED", "This work requires an account session")
 
 

@@ -153,7 +153,16 @@ class BrowserSession:
                 self._check_errors(host)
                 self.diagnostics["resource_hosts"] = sorted({host for r in snapshot["resources"]
                     if (host := _diagnostic_host(r.get("url", "")))})
-                detect_access(snapshot["text"], any(r.get("url", "").startswith("https://") for r in snapshot["resources"]))
+                self.diagnostics["scope_confirmed"] = bool(snapshot.get("scope_confirmed"))
+                self.diagnostics["identity_source"] = snapshot.get("identity_source")
+                self.diagnostics["media_schemes"] = sorted({
+                    scheme if scheme in {"https", "blob"} else "other"
+                    for r in snapshot["resources"] if r.get("url")
+                    for scheme in [r["url"].partition(":")[0]]})
+                # A scoped blob player is media that may still expose a normal
+                # HTTPS source; a comment or promotion login is not a view gate.
+                has_media = snapshot.get("scope_confirmed") and any(r.get("url") for r in snapshot["resources"])
+                detect_access(snapshot["text"], has_media)
                 try:
                     return extract_work(snapshot, work_id)
                 except LumaBoxError as exc:

@@ -12,3 +12,9 @@
 - 12 个 slide 是同一个水平 `display:flex; flex-direction:row; direction:ltr` 轨道的直接子节点。slide 的 `order:0`、`transform:none`，尺寸与 `.basePlayerContainer` 视口相同，播放器 `overflow-x:hidden`。
 - 一次原子 DOM 观察中计数器为 `9/12`，视口 x=160、宽746；slide x 从 -5808 按746递增到2398，第9个恰好位于x=160。因此用 `当前计数 + round((slide.left - viewport.left) / viewport.width)` 确定序号，并验证位置集合严格为1～总数。
 - 实现仅接受这类可由计数器和几何位置共同确认的完整线性布局；过渡动画、非水平布局、循环错位、显式克隆标记、声明序号冲突或缺失位置均拒绝。未验证所有未来轮播实现；不能仅凭节点数量宣称兼容。
+
+08:30～08:49 的专用详情页复查补充（原祖先布局不是唯一布局）：
+
+- 视频详情区使用 `[data-e2e="video-detail"]`，实际观察到 `div` 标签。唯一 `.video-detail-container[data-e2e="player-container"]` 的 `video_<id>` 语义类提供作品 ID，没有活动 feed 祖先。内部唯一视频来源持续为 blob，readyState=4、时长124.6秒，没有 source 子元素提供 HTTPS。
+- 图集详情区使用 `[data-e2e="note-detail"]`，唯一播放器与 `.noteSideBarContainer` 为同区域不同分支；侧栏唯一 `[data-e2e="feed-active-video"][data-e2e-vid]` 提供实际作品 ID，不是播放器祖先。
+- 新定位方式只读复查得到图集 ID 7695689642767235187、12个前景 HTTPS 来源及完整几何序号1～12；视频 ID 7686430330920075249、单个 blob 来源。仅用于 DOM 依据，不能替代独立 CLI 下载验收。详见[本轮诊断](2026-10-13-detail-page-extraction.md)。

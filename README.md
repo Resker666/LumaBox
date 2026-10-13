@@ -48,6 +48,8 @@ python3 -m venv .venv
 
 失败 JSON 的 `diagnostics` 记录阶段，例如 `dns_resolution`、`page_navigation`、`media_extraction`、`media_transfer`，并在浏览器阶段提供固定原因及相关域名；不会包含完整签名地址或 Cookie。HTTP 200 只说明主页面有成功响应，不能证明媒体已经提取或下载。被拒绝的子框架仍会阻断并记录，但不会单独使有效主作品失败。正常网络下 HTTP 200 后失败的分析见[诊断记录](docs/validation/2026-10-13-http-200-unsafe-target.md)。
 
+媒体提取诊断还包括 `scope_confirmed`（作品区域确认）、`identity_source`（DOM 身份来源）和 `media_schemes`（媒体协议）。普通登录推广和“登录后发表评论”不算观看限制。若作品区域已确认但来源持续为 `blob`，当前实现只能有界等待普通 HTTPS 来源，届时仍没有来源会返回 `UNSUPPORTED_MEDIA`。专用详情页定位和登录误判修复见[最新诊断](docs/validation/2026-10-13-detail-page-extraction.md)。
+
 ## 验证
 
 ```powershell
@@ -56,6 +58,6 @@ python3 -m venv .venv
 
 默认测试不访问抖音：运行真实 Chromium、测试 HTTP 服务和 FFmpeg，使用合成页面及新生成媒体。测试环境需允许浏览器进程和回环网络连接。
 
-此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[2026-10-13 独立 P0 报告](docs/validation/2026-10-13-independent-p0.md)：当前网络返回 `198.18.0.x` 非公网目的地址，两条授权样本均在页面请求前失败；真实下载尚未复现。有界面、无头、Linux 云网络分别验证。
+此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[2026-10-13 独立 P0 报告](docs/validation/2026-10-13-independent-p0.md)：本会话执行环境的真实 CLI 仍在非公网 DNS 地址阶段失败；用户正常网络已取得 HTTP 200，随后发现的详情定位和登录误判已修复。真实下载尚未复现，有界面、无头、Linux 云网络分别验证。
 
 本阶段自行实现内核，没有复制 Resker666/douyin-downloader 的业务代码。来源范围与设计见 `docs/superpowers/specs/`。
