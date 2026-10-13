@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import re
 import time
 from contextlib import AsyncExitStack
@@ -10,7 +12,8 @@ from .errors import LumaBoxError, check_status
 from .extract import DOM_SNAPSHOT, detect_access, extract_work
 from .net import resolve_public
 from .proxy import PublicProxy
-from .urls import validate_page_url, page_identity, validate_media_url
+from .urls import validate_page_url, page_identity, validate_media_url, MEDIA_HOSTS
+from .video_response import DETAIL_BODY_LIMIT, detail_request_id, extract_detail_video
 
 RESOURCE_WAIT = 45.0
 MEDIA_TYPES = frozenset({"video/mp4", "video/webm", "video/mp2t", "audio/mp4", "audio/mpeg", "audio/aac",
@@ -51,6 +54,12 @@ class BrowserSession:
         self.media_responses = []
         self.media_response_count = 0
         self.media_response_truncated = False
+        self.expected_identity = None
+        self.detail_work = None
+        self.detail_error = None
+        self.detail_tasks = set()
+        self.detail_pending = {}
+        self.detail_response_count = 0
         self.diagnostics = {"stage": "browser_start"}
 
     async def __aenter__(self):
@@ -68,6 +77,12 @@ class BrowserSession:
             cdp = await self.context.new_cdp_session(self.page)
             self.cdp = cdp
             self.main_frame_id = (await cdp.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
+            cdp.on("Network.responseReceived", self._observe_detail_response)
+            cdp.on("Network.dataReceived", self._detail_data)
+            cdp.on("Network.loadingFinished", self._detail_finished)
+            cdp.on("Network.loadingFailed", self._detail_failed)
+            await cdp.send("Network.enable", {"maxResourceBufferSize": DETAIL_BODY_LIMIT,
+                "maxTotalBufferSize": 4 * DETAIL_BODY_LIMIT, "maxPostDataSize": 0})
             cdp.on("Fetch.requestPaused", self._document)
             await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"}]})
             return self
@@ -78,6 +93,10 @@ class BrowserSession:
             raise LumaBoxError("DEPENDENCY_MISSING", "Chromium could not start; check the browser installation") from None
 
     async def __aexit__(self, *args):
+        for task in tuple(self.detail_tasks):
+            task.cancel()
+        await asyncio.gather(*tuple(self.detail_tasks), return_exceptions=True)
+        self.detail_pending.clear()
         await self.stack.aclose()
 
     async def _close_extra_page(self, page):
@@ -117,6 +136,71 @@ class BrowserSession:
             except LumaBoxError as exc:
                 self.error = exc
         self._observe_media_response(response)
+
+    def _observe_detail_response(self, event):
+        if event.get("frameId") != self.main_frame_id or event.get("type") not in {"Fetch", "XHR"}:
+            return
+        response = event["response"]
+        work_id = detail_request_id(response["url"])
+        if not work_id:
+            return
+        try:
+            identity = self.expected_identity or page_identity(self.page.url)
+        except LumaBoxError:
+            return
+        if identity != (work_id, "video"):
+            return
+        try:
+            check_status(response["status"])
+        except LumaBoxError as exc:
+            self.error = exc
+            return
+        if response["status"] != 200 or response.get("mimeType", "").lower() != "application/json" or self.detail_response_count >= 4:
+            return
+        self.detail_response_count += 1
+        headers = {key.lower(): str(value) for key, value in response.get("headers", {}).items()}
+        length = headers.get("content-length", "")
+        if length and (not re.fullmatch(r"[0-9]{1,10}", length) or int(length) > DETAIL_BODY_LIMIT):
+            return
+        self.detail_pending[event["requestId"]] = {"work_id": work_id, "bytes": 0}
+
+    def _detail_data(self, event):
+        pending = self.detail_pending.get(event["requestId"])
+        if pending:
+            pending["bytes"] += event["dataLength"]
+            if pending["bytes"] > DETAIL_BODY_LIMIT:
+                self.detail_pending.pop(event["requestId"], None)
+
+    def _detail_failed(self, event):
+        self.detail_pending.pop(event["requestId"], None)
+
+    def _detail_finished(self, event):
+        pending = self.detail_pending.pop(event["requestId"], None)
+        if not pending or not 0 < pending["bytes"] <= DETAIL_BODY_LIMIT:
+            return
+        task = asyncio.create_task(self._read_detail_response(event["requestId"], pending["work_id"]))
+        self.detail_tasks.add(task)
+        task.add_done_callback(self.detail_tasks.discard)
+
+    async def _read_detail_response(self, request_id, work_id):
+        try:
+            # Read from our bounded inspector cache, after decoded dataLength
+            # was confirmed. A small compressed wire length is not sufficient.
+            result = await asyncio.wait_for(self.cdp.send("Network.getResponseBody", {"requestId": request_id}), 10)
+            text = result["body"]
+            if len(text) > 4 * ((DETAIL_BODY_LIMIT + 2) // 3):
+                return
+            body = base64.b64decode(text, validate=True) if result["base64Encoded"] else text.encode("utf-8")
+            if len(body) > DETAIL_BODY_LIMIT:
+                return
+            work = extract_detail_video(json.loads(body), work_id)
+            if work and self.detail_work is None:
+                self.detail_work = work
+        except LumaBoxError as exc:
+            self.detail_error = exc
+        except (PlaywrightError, ValueError, RecursionError, asyncio.TimeoutError):
+            # A normal response may be incomplete or cancelled by navigation.
+            pass
 
     def _observe_media_response(self, response):
         resource_type = response.request.resource_type
@@ -177,6 +261,7 @@ class BrowserSession:
                     raise LumaBoxError(failure["code"], "Browser network connection failed")
 
     async def load(self, link):
+        self.expected_identity = (link.work_id, link.kind) if link.work_id else None
         self.diagnostics = {"stage": "input_policy"}
         validate_page_url(link.url)
         host = urlsplit(link.url).hostname
@@ -194,7 +279,7 @@ class BrowserSession:
             raise LumaBoxError("RESOURCE_TIMEOUT", "The work page could not load in 30 seconds") from None
         deadline = time.monotonic() + RESOURCE_WAIT
         last = None
-        expected_identity = (link.work_id, link.kind) if link.work_id else None
+        expected_identity = self.expected_identity
         while time.monotonic() < deadline:
             self._check_errors(host)
             self.diagnostics = {"stage": "target_identity"}
@@ -203,15 +288,24 @@ class BrowserSession:
                 work_id, kind = identity
                 if expected_identity is None:
                     expected_identity = identity
+                    self.expected_identity = identity
                 if identity != expected_identity:
                     raise LumaBoxError("UNSUPPORTED_MEDIA", "The browser switched to a different work")
                 self.diagnostics = {"stage": "media_extraction"}
-                snapshot = await self.page.evaluate(DOM_SNAPSHOT, {"work_id": work_id, "kind": kind})
+                try:
+                    snapshot = await self.page.evaluate(DOM_SNAPSHOT, {"work_id": work_id, "kind": kind})
+                except PlaywrightError as exc:
+                    if "Execution context was destroyed" not in exc.message and "Cannot find context with specified id" not in exc.message:
+                        raise
+                    await asyncio.sleep(0.25)
+                    continue
                 self._check_errors(host)
                 self.diagnostics["resource_hosts"] = sorted({host for r in snapshot["resources"]
                     if (host := _diagnostic_host(r.get("url", "")))})
                 self.diagnostics["scope_confirmed"] = bool(snapshot.get("scope_confirmed"))
                 self.diagnostics["identity_source"] = snapshot.get("identity_source")
+                self.diagnostics["detail_response_count"] = self.detail_response_count
+                self.diagnostics["detail_metadata_parsed"] = bool(self.detail_work and self.detail_work.work_id == work_id)
                 self.diagnostics["media_schemes"] = sorted({
                     scheme if scheme in {"https", "blob"} else "other"
                     for r in snapshot["resources"] if r.get("url")
@@ -227,6 +321,14 @@ class BrowserSession:
                         self.diagnostics["reason"] = exc.message
                         raise
                     last = exc
+                    if kind == "video" and snapshot.get("scope_confirmed") and snapshot.get("count") == 1:
+                        if self.detail_error:
+                            self.diagnostics["reason"] = self.detail_error.message
+                            raise self.detail_error
+                        if self.detail_work and self.detail_work.work_id == work_id:
+                            self.diagnostics["resource_source"] = "normal_detail_response"
+                            self.diagnostics["resource_hosts"] = sorted({_diagnostic_host(r.url) for r in self.detail_work.resources})
+                            return self.detail_work
             else:
                 text = await self.page.locator("body").inner_text(timeout=1000)
                 detect_access(text[:20000], False)
@@ -238,7 +340,8 @@ class BrowserSession:
 
     async def media_headers(self, url: str) -> dict[str, str]:
         validate_media_url(url)
-        cookies = await self.context.cookies([url])
+        # The newly verified CDN works without any session credentials.
+        cookies = [] if urlsplit(url).hostname in MEDIA_HOSTS else await self.context.cookies([url])
         headers = {"User-Agent": await self.page.evaluate("navigator.userAgent"), "Referer": self.page.url, "Accept-Encoding": "identity"}
         if cookies:
             headers["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies)

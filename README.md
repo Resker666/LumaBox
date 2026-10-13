@@ -48,11 +48,13 @@ python3 -m venv .venv
 
 失败 JSON 的 `diagnostics` 记录阶段，例如 `dns_resolution`、`page_navigation`、`media_extraction`、`media_transfer`，并在浏览器阶段提供固定原因及相关域名；不会包含完整签名地址或 Cookie。HTTP 200 只说明主页面有成功响应，不能证明媒体已经提取或下载。被拒绝的子框架仍会阻断并记录，但不会单独使有效主作品失败。正常网络下 HTTP 200 后失败的分析见[诊断记录](docs/validation/2026-10-13-http-200-unsafe-target.md)。
 
-媒体提取诊断还包括 `scope_confirmed`（作品区域确认）、`identity_source`（DOM 身份来源）和 `media_schemes`（媒体协议）。普通登录推广和“登录后发表评论”不算观看限制。若作品区域已确认但来源持续为 `blob`，当前实现只能有界等待普通 HTTPS 来源，届时仍没有来源会返回 `UNSUPPORTED_MEDIA`。专用详情页定位和登录误判修复见[最新诊断](docs/validation/2026-10-13-detail-page-extraction.md)。
+媒体提取诊断还包括 `scope_confirmed`（作品区域确认）、`identity_source`（DOM 身份来源）和 `media_schemes`（媒体协议）。普通登录推广和“登录后发表评论”不算观看限制。若作品播放器持续使用 `blob`，程序也会观察同一主框架正常发出的目标详情响应，核对请求、响应和可见作品的 ID，提取完整 H.264 播放地址；不会主动调用详情接口或下载未绑定作品的媒体响应。缺少这条正常响应或无法确认作品时，仍明确失败。具体证据见[持续 blob 视频的真实验证](docs/validation/2026-10-13-video-normal-response.md)。
 
 图集在加载初期可能让所有前景元素引用同一张 `douyinDefault` 静态默认图。程序识别已实际观察到的默认图并在原45秒资源时限内等待替换；它不能算作作品图片，也不会扩展媒体域名白名单。具体证据见[默认图和持续 blob 分析](docs/validation/2026-10-13-blob-and-gallery-placeholder.md)。
 
-若图集在 `media_transfer` 阶段失败，报告会提供固定错误原因、图片序号、响应主机、状态和脱敏后的 Content-Type；未知类型只记录类别，不输出完整响应头或签名地址。JPEG/WebP 仍须通过文件头、FFprobe 编码和 FFmpeg 完整解码检查。相关验证见[图集格式与视频请求分析](docs/validation/2026-10-13-gallery-format-and-video-requests.md)。持续 blob 的视频尚未实现正常请求资源的归属确认与下载，独立程序真实 P0 仍未通过。
+若图集在 `media_transfer` 阶段失败，报告会提供固定错误原因、图片序号、响应主机、状态和脱敏后的 Content-Type；未知类型只记录类别，不输出完整响应头或签名地址。JPEG/WebP 仍须通过文件头、FFprobe 编码和 FFmpeg 完整解码检查。用户正常网络已成功下载并完整解码 12 张图集图片。相关格式修补见[图集格式与视频请求分析](docs/validation/2026-10-13-gallery-format-and-video-requests.md)。
+
+正常详情响应最多读取四份，单份解压后正文最多 2 MiB，使用有容量限制的 Chromium 诊断缓存读取。`detail_response_count` 和 `detail_metadata_parsed` 区分未出现目标详情响应与已解析状态。新增视频 CDN 只允许实际观察到的两个精确 `zjcdn.com` 主机，这两个主机的下载请求不携带 Cookie。
 
 浏览器加载失败的诊断自动包含 `media_responses`：正常页面媒体响应的主机、请求类型、HTTP 状态、内容类型、文件格式提示、是否范围响应、总字节数（响应头可用时）、首个响应样本大小及同组次数。最多保留20组，`media_response_count` 为观察总数，`media_response_truncated` 表示有省略。它们不含完整地址、查询、Cookie或响应正文，只提供下一步分析的证据，不能证明响应属于目标作品或完整文件。
 
@@ -64,6 +66,6 @@ python3 -m venv .venv
 
 默认测试不访问抖音：运行真实 Chromium、测试 HTTP 服务和 FFmpeg，使用合成页面及新生成媒体。测试环境需允许浏览器进程和回环网络连接。
 
-此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[2026-10-13 独立 P0 报告](docs/validation/2026-10-13-independent-p0.md)：本会话执行环境的真实 CLI 仍在非公网 DNS 地址阶段失败；用户正常网络已取得 HTTP 200，随后发现的详情定位和登录误判已修复。真实下载尚未复现，有界面、无头、Linux 云网络分别验证。
+此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已通过正式内核下载并完整解码新的 1080p H.264/AAC 视频，但该次运行单独使用临时公网 DNS 解析，默认 CLI 在当前 VPN 地址映射下仍失败。用户正常网络的默认 CLI 视频、有界面/无头及 Linux 云网络需要分别确认；网站阶段尚未开始。
 
 本阶段自行实现内核，没有复制 Resker666/douyin-downloader 的业务代码。来源范围与设计见 `docs/superpowers/specs/`。

@@ -11,6 +11,37 @@ ID = "7695689642767235187"
 VIDEO_ID = "7686430330920075249"
 
 
+def test_cli_downloads_normal_detail_video_without_sending_cdn_cookies(monkeypatch, media_fixtures, server, tmp_path, capsys):
+    from test_video_responses import blob_page, detail_payload
+    monkeypatch.setattr(browser_module,"resolve_public",lambda host:("93.184.216.34",))
+    monkeypatch.setattr(browser_module,"RESOURCE_WAIT",2)
+    html = blob_page([f"/aweme/v1/web/aweme/detail/?aweme_id={VIDEO_ID}"])
+    server[0]['/target-file?signature=secret'] = (200,{'Content-Type':'video/mp4'},media_fixtures[0].read_bytes())
+    original_enter = browser_module.BrowserSession.__aenter__
+    async def fixture_enter(session):
+        await original_enter(session)
+        await session.context.add_cookies([{'name':'test-cookie','value':'private','domain':'v5-hl-mly-ov.zjcdn.com','path':'/','secure':True}])
+        async def serve(route):
+            if route.request.resource_type == 'document':
+                await route.fulfill(status=200,content_type='text/html',body=html)
+            elif '/aweme/detail/' in route.request.url:
+                await route.fulfill(status=200,content_type='application/json',body=json.dumps(detail_payload()))
+            else:
+                await route.abort()
+        await session.context.route('**/*',serve)
+        return session
+    monkeypatch.setattr(browser_module.BrowserSession,'__aenter__',fixture_enter)
+    assert main([f'https://www.douyin.com/video/{VIDEO_ID}','--authorized','--headless','--output',str(tmp_path)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['work_id'] == VIDEO_ID
+    assert result['expected_count'] == result['actual_count'] == 1
+    assert result['checks']['full_decode'] is True
+    assert (Path(result['output_directory']) / f'{VIDEO_ID}.mp4').read_bytes() == media_fixtures[0].read_bytes()
+    assert server[1] == [('/target-file?signature=secret',None)]
+    assert 'secret' not in json.dumps(result)
+    assert not list(tmp_path.glob('.partial-*'))
+
+
 @pytest.mark.parametrize("kind,failed", [("video", False), ("gallery", False), ("gallery", True)])
 def test_cli_real_browser_transfer_decode_and_publish(monkeypatch, media_fixtures, server, tmp_path, capsys, kind, failed):
     monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))

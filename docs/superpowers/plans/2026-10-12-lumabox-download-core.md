@@ -151,3 +151,5 @@
 技术依据：[Playwright 网络与代理](https://playwright.dev/python/docs/network)、[Chromium Fetch 文档请求拦截](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/)、[Playwright CDP 会话](https://playwright.dev/python/docs/api/class-browsercontext#browser-context-new-cdp-session)。特别注意官方网络文档说明浏览器重定向不会重新触发同一 route，地址校验不能只放在 route 回调里。
 
 执行方式：在当前新仓库由本会话直接实施，任务末尾跑完整测试并提交，最终做一次独立代码审查。用户已确认设计及计划并指示“执行”；2026-10-12/13 已实现独立 CLI。真实 P0 因系统 DNS 返回非公网目的地址未通过，保留诊断和复测命令，未进入网站阶段。
+
+后续（2026-10-13）：用户正常网络已完成 12/12 图集验证。视频补足同一主框架正常详情响应的作品绑定与完整 H.264 地址提取，在临时公网 DNS 条件下通过正式 CLI 新下载并完整解码 1080p H.264/AAC MP4；默认 VPN DNS 条件仍失败，匿名前端加载也有时限内未确认目标的失败。详见 `docs/validation/2026-10-13-video-normal-response.md`，Task 6 的默认网络视频及无头/云验收复选框保持待完成，网站阶段未开始。

@@ -2,18 +2,18 @@
 
 在 `E:\develop\douyin-downloader\lumabox` 的 PowerShell 运行。现有环境为可编辑安装，无需重新安装、账号登录或提供 Cookie。
 
-本轮先只复测图集，验证新的 JPEG/WebP 下载及验证流程：
+图集已经由正常网络成功验证 12 张，下一步只复测新接入的正常详情响应视频路径：
 
 ```powershell
-.\.venv\Scripts\python.exe -m lumabox --authorized "https://v.douyin.com/p6mTe8JN73M/" --output Downloaded/p0-gallery
+.\.venv\Scripts\python.exe -m lumabox --authorized "https://www.douyin.com/video/7686430330920075249" --output Downloaded/p0-video
 ```
 
-只有 `status=success`、`expected_count=actual_count=12`、`checks.full_decode=true` 才算该图集真实下载成功。图片扩展名按实际编码确定，可能为 `.jpg` 或 `.webp`；ZIP 中应包括完整 12 张图片及报告。
+只有 `status=success`、`expected_count=actual_count=1`、`checks.full_decode=true`，并产生非空 MP4，才算本次默认 CLI 视频成功。此样本已在临时公网 DNS 条件下通过正式内核取得 1920×1080、124.6 秒、H.264/AAC 的完整文件；不能外推到所有作品或网络。
 
-若失败，提供完整最终 JSON。传输失败现在会报告 `reason`、`resource_order`、`host`、`http_status` 和 `content_type`，可区分不支持的图片类型、访问拒绝和文件问题。旧报告未保留 Content-Type，因此目前不能断言用户上次失败时服务器一定返回了 WebP。
+若失败，提供完整最终 JSON。`detail_response_count` 和 `detail_metadata_parsed` 可判断正常详情响应是否出现并解析；传输阶段的 `reason`、`host`、`http_status` 和 `content_type` 可区分媒体连接、访问拒绝和格式问题。
 
-视频暂不重复同一条命令。用户已提供正常网络下的持续 blob 和两组视频 CDN 的 206 响应；这些信息足以否定仅等待 DOM 变成 HTTPS 的通用性。下一步需要在独立程序能够加载该页面的环境中观察正常页面响应，确认目标作品 ID 与完整媒体资源的对应关系，再决定下载完整 MP4 或处理分离音视频。未绑定目标的页面视频、静态宣传素材和特效不得作为成功结果。
+此次命令使用已修补的提取路径，不再只等待 blob 变为 HTTPS。程序仅观察页面本来就发出的详情请求，并核对目标作品，下载完整 MP4；不从未绑定的范围请求、推荐或特效素材中猜测目标，也没有增加分离音视频拼接功能。
 
-当前 Codex 执行环境实测仍在 DNS 阶段因非公网地址映射失败，不能采集这条播放路径的响应正文。此次兼容改动未修复持续 blob 视频，也未通过真实 P0；不会据此开始网站开发。
+默认 CLI 保留系统 DNS 与公网目的地址校验。如果使用返回非公网映射的 VPN DNS，仍会在页面前返回 `UNSAFE_TARGET`。真实下载及条件区别见 [视频正常响应验证](2026-10-13-video-normal-response.md)；本轮未修改系统网络或发布诊断解析器，网站阶段尚未开始。
 
 不要复制账号 Cookie、媒体签名地址或导出包含登录资料的 HAR。若仍出现 Windows 连接关闭回调 10054，保留该输出和最终 JSON；此异常尚未单独修复。

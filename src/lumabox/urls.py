@@ -6,6 +6,8 @@ from .models import InputLink
 
 PAGE_HOSTS = frozenset({"douyin.com", "www.douyin.com", "v.douyin.com", "iesdouyin.com", "www.iesdouyin.com"})
 MEDIA_ROOTS = ("douyinvod.com", "douyinpic.com")
+# Exact hosts observed in the target detail response; one full MP4 was decoded.
+MEDIA_HOSTS = frozenset({"v5-hl-mly-ov.zjcdn.com", "v5-dy-ov-experiment.zjcdn.com"})
 WORK_PATH = re.compile(r"^/(video|note)/(\d{15,20})/?$")
 
 
@@ -34,7 +36,7 @@ def validate_page_url(url: str) -> str:
 
 def validate_media_url(url: str) -> str:
     host = https_parts(url).hostname
-    if not any(host == root or host.endswith("." + root) for root in MEDIA_ROOTS):
+    if host not in MEDIA_HOSTS and not any(host == root or host.endswith("." + root) for root in MEDIA_ROOTS):
         raise LumaBoxError("UNSAFE_TARGET", "Media host has not been verified")
     return url
 
