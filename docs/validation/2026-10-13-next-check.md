@@ -1,8 +1,10 @@
-# 下一次正常网络检查：无头模式
+# 可选后续检查：无头与云环境
+
+最新无头运行 `d8748dcbfa9a4be1b54c970394e70ef3` 在 DNS 阶段因非公网结果停止，HTTP 状态为空，未请求作品页面。按用户要求先整理 0.1.0 版本，不继续重试；以下命令保留供之后恢复验证，当前无需再次运行。
 
 默认有界面 CLI 已在用户正常网络下载并完整解码 1 个视频、12 张图集图片；实际文件、编号、ZIP 和报告已复核。成功运行分别为 `7f6c551d1fcc4f7180a68d6483babe83`、`7731a88238664cdaa9c084158ec9f126`，详见[最新验收](2026-10-13-video-normal-response.md)。无需重复相同的有界面验收。
 
-下一步在相同正常网络、`E:\develop\douyin-downloader\lumabox` 的 PowerShell 测试 `--headless`。这次不会显示 Chromium 窗口，仍使用程序自己的临时匿名会话，不需要登录或提供 Cookie。
+之后恢复无头验证时，在正常网络、`E:\develop\douyin-downloader\lumabox` 的 PowerShell 测试 `--headless`。这次不会显示 Chromium 窗口，仍使用程序自己的临时匿名会话，不需要登录或提供 Cookie。
 
 先运行视频：
 

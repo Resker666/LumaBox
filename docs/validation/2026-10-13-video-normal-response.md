@@ -12,7 +12,13 @@
 
 用户两次粘贴的是同一个运行 ID，计为一次成功。Windows `_ProactorBasePipeTransport._call_connection_lost` 的 10054 回调仍出现，但本次没有阻止文件验证及成功发布；该回调问题未修复。此结果只确认当前 Windows 正常网络的有界面视频和图集样本，无头、Linux/云网络及其他作品尚未验收。网站阶段尚未开始，可据此制定后续阶段计划。
 
-## 真实文件
+## 最新无头测试：DNS 阶段停止
+
+2026-10-13 22:44（Asia/Shanghai），用户运行默认 CLI 加 `--headless`。运行 `d8748dcbfa9a4be1b54c970394e70ef3` 返回 `UNSAFE_TARGET`，阶段 `dns_resolution`，原因 `DNS returned a non-public destination`，主机 `www.douyin.com`，HTTP 状态为空、媒体响应数 0，没有下载产物。本会话已读取本地失败报告核对。
+
+此失败在页面请求之前，不能视为已验证无头页面提取失败，也不能影响此前有界面实际下载成功的事实。用户要求不继续纠结该问题，先整理本版供 GitHub 推送审阅；无头和云环境验收保持待完成，不再请求用户立即重复测试。
+
+## 临时诊断阶段的真实文件
 
 授权视频：`7686430330920075249`。
 
