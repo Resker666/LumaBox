@@ -1,11 +1,8 @@
 import hashlib
 import json
 import math
-import os
 import re
 import shutil
-import signal
-import subprocess
 import sys
 import threading
 import time
@@ -13,11 +10,13 @@ import zipfile
 from pathlib import Path
 
 from .config import InstanceLock, WebError
+from .process import ProcessTree
 from .store import ID
 
 ERRORS = frozenset({"INVALID_INPUT", "UNSAFE_TARGET", "AUTH_REQUIRED", "BLOCKED", "NOT_FOUND",
                     "RATE_LIMITED", "UNSUPPORTED_MEDIA", "PARSE_CHANGED", "VERIFY_FAILED", "SIZE_LIMIT",
-                    "DEPENDENCY_MISSING", "INTERRUPTED", "DOWNLOAD_FAILED", "TIMEOUT", "STORAGE_FULL"})
+                    "DEPENDENCY_MISSING", "INTERRUPTED", "DOWNLOAD_FAILED", "TIMEOUT", "STORAGE_FULL",
+                    "CHALLENGE_REQUIRED", "RESOURCE_TIMEOUT"})
 
 
 class JobWorker:
@@ -63,24 +62,6 @@ class JobWorker:
             command.append("--headless")
         return command
 
-    @staticmethod
-    def _interrupt(process):
-        if process.poll() is not None:
-            return
-        try:
-            if os.name == "nt":
-                process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                os.killpg(process.pid, signal.SIGINT)
-            process.wait(timeout=4)
-        except (OSError, subprocess.TimeoutExpired):
-            process.terminate()
-            try:
-                process.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=4)
-
     def run_once(self) -> bool:
         if self.stopping.is_set():
             return False
@@ -95,11 +76,9 @@ class JobWorker:
             directory.mkdir()
             output = directory / "cli-result.jsonl"
             with output.open("xb") as stdout:
-                kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-                process = subprocess.Popen(self.command(job, directory), stdin=subprocess.DEVNULL,
-                                           stdout=stdout, stderr=subprocess.DEVNULL, shell=False, **kwargs)
-                start = time.monotonic()
-                try:
+                with ProcessTree(self.command(job, directory), stdout) as tree:
+                    process = tree.process
+                    start = time.monotonic()
                     while process.poll() is None:
                         if self.stopping.wait(.05):
                             raise WebError("INTERRUPTED")
@@ -109,8 +88,6 @@ class JobWorker:
                             raise WebError("VERIFY_FAILED")
                         if self.store.usage() > self.config.capacity_bytes:
                             raise WebError("STORAGE_FULL")
-                finally:
-                    self._interrupt(process)
             if self.stopping.is_set():
                 raise WebError("INTERRUPTED")
             if output.stat().st_size > 256 * 1024:
@@ -122,12 +99,15 @@ class JobWorker:
             files = self._verify(job, directory, result)
             if self.store.usage() > self.config.capacity_bytes:
                 raise WebError("STORAGE_FULL")
+            try:
+                output.unlink()
+            except OSError:
+                pass  # Private auxiliary log is not part of publication.
             self.store.finish(job["id"], result, files)
-            output.unlink()
         except Exception as exc:
             code = exc.code if isinstance(exc, WebError) and exc.code in ERRORS else "VERIFY_FAILED"
-            self.store.cleanup(job["id"])
             self.store.fail(job["id"], code)
+            self.store.try_cleanup(job["id"])
         return True
 
     def _verify(self, job, directory, result):
@@ -183,10 +163,13 @@ class JobWorker:
             # The CLI's private report contains local paths. Publish a minimal portable report instead.
             public_report = {key: result[key] for key in ("work_id", "kind", "status", "expected_count", "actual_count", "bytes", "checks")}
             public_report["files"] = [{key: file[key] for key in ("name", "bytes", "sha256", "width", "height", "duration")} for file in files]
+            archive.unlink()  # Verified, rebuildable ZIP; avoid a third full media copy.
             replacement = dest / "images.tmp"
             with zipfile.ZipFile(replacement, "x", compression=zipfile.ZIP_STORED) as output:
                 for file in files:
                     output.write(dest / file["name"], file["name"])
+                    if self.store.usage() > self.config.capacity_bytes:
+                        raise WebError("STORAGE_FULL")
                 output.writestr("report.json", json.dumps(public_report, ensure_ascii=False, indent=2))
             replacement.replace(archive)
             with archive.open("rb") as stream:

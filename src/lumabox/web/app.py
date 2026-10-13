@@ -174,22 +174,26 @@ def create_app(config: WebConfig, password: str, worker: JobWorker | None = None
     @app.get("/api/files/{file_id}")
     def download(file_id: str, request: Request):
         session(request)
-        file = store.file(file_id)
-        try:
-            stream = store.file_path(file).open("rb")
-        except OSError:
-            raise WebError("NOT_FOUND", 404) from None
+        lease = store.open_file(file_id)
+        file, stream = lease.__enter__()
+        released = False
+
+        def release():
+            nonlocal released
+            if not released:
+                released = True
+                lease.__exit__(None, None, None)
 
         def chunks():
             try:
                 while chunk := stream.read(64 * 1024):
                     yield chunk
             finally:
-                stream.close()
+                release()
 
         return StreamingResponse(chunks(), media_type=file["mime"], headers={
             "Content-Length": str(file["bytes"]), "Content-Disposition": f'attachment; filename="{file["name"]}"'},
-            background=BackgroundTask(stream.close))
+            background=BackgroundTask(release))
 
     static = Path(__file__).parent / "static"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import re
 import shutil
 import sqlite3
@@ -22,6 +23,7 @@ class JobStore:
     def __init__(self, config: WebConfig):
         self.config = config
         self.lock = threading.RLock()
+        self.downloads = {}
         config.data_dir.mkdir(parents=True, exist_ok=True)
         config.output_dir.mkdir(exist_ok=True)
         if is_link(config.output_dir):
@@ -126,8 +128,8 @@ class JobStore:
         with self.connection() as db:
             ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status='running'")]
         for job_id in ids:
-            self.cleanup(job_id)
             self.fail(job_id, "INTERRUPTED")
+            self.try_cleanup(job_id)
 
     def file(self, file_id: str) -> dict:
         if not ID.fullmatch(file_id):
@@ -159,6 +161,34 @@ class JobStore:
         if not path.is_file() or path.stat().st_size != file["bytes"]:
             raise WebError("NOT_FOUND", 404)
         return path
+
+    @contextmanager
+    def open_file(self, file_id: str):
+        # Acquire the lease before expiry can remove the directory or file record.
+        with self.lock:
+            file = self.file(file_id)
+            try:
+                stream = self.file_path(file).open("rb")
+            except OSError:
+                raise WebError("NOT_FOUND", 404) from None
+            job_id = file["job_id"]
+            self.downloads[job_id] = self.downloads.get(job_id, 0) + 1
+        try:
+            yield file, stream
+        finally:
+            stream.close()
+            with self.lock:
+                self.downloads[job_id] -= 1
+                if not self.downloads[job_id]:
+                    del self.downloads[job_id]
+
+    def try_cleanup(self, job_id: str) -> bool:
+        try:
+            self.cleanup(job_id)
+            return True
+        except (OSError, WebError):
+            logging.getLogger(__name__).warning("Private output cleanup deferred; will retry at expiry.")
+            return False
 
     def cleanup(self, job_id: str):
         if not ID.fullmatch(job_id):
@@ -199,7 +229,9 @@ class JobStore:
             ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE status IN ('success','failed') AND updated_at<?",
                                             (now - self.config.retention_seconds,))]
         for job_id in ids:
-            self.cleanup(job_id)
-            with self.connection() as db:
-                db.execute("UPDATE jobs SET status='expired',updated_at=? WHERE id=?", (now, job_id))
-                db.execute("DELETE FROM files WHERE job_id=?", (job_id,))
+            with self.lock:
+                if self.downloads.get(job_id) or not self.try_cleanup(job_id):
+                    continue
+                with self.connection() as db:
+                    db.execute("UPDATE jobs SET status='expired',updated_at=? WHERE id=?", (now, job_id))
+                    db.execute("DELETE FROM files WHERE job_id=?", (job_id,))

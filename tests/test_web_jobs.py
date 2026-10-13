@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import zipfile
@@ -170,3 +173,185 @@ def test_symlink_file_is_never_served_or_followed_by_cleanup(config, tmp_path, m
         store.file_path(file)
     store.expire(now=time.time() + 86401)
     assert outside.read_bytes() == b"must survive"
+
+
+def test_download_lease_defers_expiry_until_stream_closes(config, tmp_path, media_fixtures):
+    store = JobStore(config)
+    job = store.create(URL)
+    fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
+    file_id = store.get(job["id"])["files"][0]["id"]
+    with store.open_file(file_id) as (file, stream):
+        store.expire(now=time.time() + 86401)
+        assert store.get(job["id"])["status"] == "success"
+        assert stream.read() == media_fixtures[0].read_bytes()
+    store.expire(now=time.time() + 86401)
+    assert store.get(job["id"])["status"] == "expired"
+
+
+def test_cleanup_failure_is_retried_without_stranding_queue(config, tmp_path, media_fixtures, monkeypatch):
+    store = JobStore(config)
+    old = store.create(URL)
+    fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
+    future = time.time() + 86401
+    original_cleanup = store.cleanup
+    attempts = []
+    def temporarily_locked(job_id):
+        attempts.append(job_id)
+        if job_id == old["id"]:
+            raise PermissionError("controlled sharing violation")
+        original_cleanup(job_id)
+    monkeypatch.setattr(store, "cleanup", temporarily_locked)
+    store.expire(now=future)
+    next_job = store.create(URL)
+    fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
+    assert store.get(next_job["id"])["status"] == "success"
+    monkeypatch.setattr(store, "cleanup", original_cleanup)
+    store.expire(now=future)
+    assert store.get(old["id"])["status"] == "expired"
+    assert attempts == [old["id"]]
+
+
+def test_failure_terminal_state_does_not_depend_on_cleanup(config, tmp_path, media_fixtures, monkeypatch):
+    store = JobStore(config)
+    job = store.create(URL)
+    def locked(_):
+        raise PermissionError("controlled sharing violation")
+    monkeypatch.setattr(store, "cleanup", locked)
+    fixture_worker(config, store, tmp_path, media_fixtures[0], "failed").run_once()
+    assert store.get(job["id"])["status"] == "failed"
+    assert store.get(job["id"])["error"] == "AUTH_REQUIRED"
+
+
+def test_auxiliary_log_delete_failure_never_removes_published_media(config, tmp_path, media_fixtures, monkeypatch):
+    from pathlib import Path
+    original_unlink = Path.unlink
+    def locked(path, *args, **kwargs):
+        if path.name == "cli-result.jsonl":
+            raise PermissionError("controlled sharing violation")
+        return original_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", locked)
+    store = JobStore(config)
+    job = store.create(URL)
+    fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
+    result = store.get(job["id"])
+    assert result["status"] == "success"
+    assert store.file_path(store.file(result["files"][0]["id"])).read_bytes() == media_fixtures[0].read_bytes()
+
+
+def test_gallery_rewrite_does_not_hold_two_archives(config, tmp_path, media_fixtures, monkeypatch):
+    store = JobStore(config)
+    job = store.create("https://v.douyin.com/test/")
+    original_write = zipfile.ZipFile.write
+    def measure(archive, filename, *args, **kwargs):
+        # Only the real rewrite in this process is observed; child creates the original ZIP.
+        existing = list((config.output_dir / job["id"]).rglob("*.zip"))
+        assert not existing, "Old ZIP still takes space while replacement is written"
+        return original_write(archive, filename, *args, **kwargs)
+    monkeypatch.setattr(zipfile.ZipFile, "write", measure)
+    fixture_worker(config, store, tmp_path, media_fixtures[1], "gallery").run_once()
+    assert store.get(job["id"])["status"] == "success"
+
+
+@pytest.mark.parametrize("code", ["CHALLENGE_REQUIRED", "RESOURCE_TIMEOUT"])
+def test_core_access_errors_keep_actionable_fixed_codes(config, tmp_path, media_fixtures, code):
+    store = JobStore(config)
+    job = store.create(URL)
+    fixture_worker(config, store, tmp_path, media_fixtures[0], code).run_once()
+    assert store.get(job["id"])["error"] == code
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows lifecycle regression")
+@pytest.mark.parametrize("parent_exits", [False, True])
+def test_process_tree_stops_real_ignoring_child_and_grandchild(tmp_path, parent_exits):
+    import ctypes
+    from ctypes import wintypes
+    from lumabox.web.process import ProcessTree
+    marker = tmp_path / "pids.txt"
+    leaf = "import os,signal,sys,time;from pathlib import Path;signal.signal(signal.SIGBREAK,signal.SIG_IGN);Path(sys.argv[1]).open('a').write(str(os.getpid())+'\\n');time.sleep(60)"
+    middle = "import os,subprocess,sys,time,signal;from pathlib import Path;signal.signal(signal.SIGBREAK,signal.SIG_IGN);Path(sys.argv[1]).open('a').write(str(os.getpid())+'\\n');subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]]);time.sleep(60)"
+    parent = "import subprocess,sys,time,signal;signal.signal(signal.SIGBREAK,signal.SIG_IGN);subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1],sys.argv[3]]);time.sleep(.6 if sys.argv[4]=='exit' else 60)"
+    with (tmp_path / "out.log").open("wb") as output:
+        with ProcessTree([sys.executable, "-c", parent, str(marker), middle, leaf, "exit" if parent_exits else "wait"], output) as tree:
+            deadline = time.monotonic() + 5
+            while (not marker.exists() or len(marker.read_text().splitlines()) < 2) and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert marker.exists() and len(marker.read_text().splitlines()) == 2
+            if parent_exits:
+                tree.process.wait(timeout=5)
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handles = [kernel.OpenProcess(0x100000, False, int(pid)) for pid in marker.read_text().splitlines()]
+            try:
+                assert all(handles)
+                tree.stop()
+                assert tree.process.poll() is not None
+                assert all(kernel.WaitForSingleObject(handle, 0) == 0 for handle in handles)
+            finally:
+                for handle in handles:
+                    if handle: kernel.CloseHandle(handle)
+
+
+def test_process_tree_allows_real_chromium_launch_and_render(tmp_path):
+    from lumabox.web.process import ProcessTree
+    script = tmp_path / "browser.py"
+    script.write_text('''from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.set_content('<h1>nested browser rendered</h1>')
+    print(page.locator('h1').inner_text())
+    browser.close()
+''', encoding="utf-8")
+    output_path = tmp_path / "browser.log"
+    with output_path.open("wb") as output:
+        with ProcessTree([sys.executable, str(script)], output) as tree:
+            assert tree.process.wait(timeout=20) == 0
+    assert output_path.read_text().strip() == "nested browser rendered"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction boundary")
+def test_windows_junction_is_rejected_without_deleting_target(config, tmp_path, media_fixtures):
+    import _winapi
+    store = JobStore(config)
+    job = store.create(URL)
+    fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
+    file = store.file(store.get(job["id"])["files"][0]["id"])
+    job_root = config.output_dir / job["id"]
+    outside = tmp_path / "moved"
+    job_root.rename(outside)
+    _winapi.CreateJunction(str(outside), str(job_root))
+    try:
+        with pytest.raises(WebError, match="NOT_FOUND"):
+            store.file_path(file)
+        assert not store.try_cleanup(job["id"])
+        assert list(outside.rglob("*.mp4"))[0].read_bytes() == media_fixtures[0].read_bytes()
+    finally:
+        job_root.rmdir()
+
+
+def test_max_gallery_stays_below_capacity_at_reserve_boundary(config, tmp_path, media_fixtures, monkeypatch):
+    store = JobStore(config)
+    occupied = config.output_dir / "occupied.bin"
+    with occupied.open("wb") as file:
+        file.truncate(1536 * 1024**2)  # Independent boundary: 2 GiB minus 512 MiB.
+    job = store.create("https://v.douyin.com/test/")
+    peaks = []
+    original_write = zipfile.ZipFile.write
+    def measure(archive, filename, *args, **kwargs):
+        result = original_write(archive, filename, *args, **kwargs)
+        peak = store.usage()
+        peaks.append(peak)
+        assert peak <= 2 * 1024**3
+        return result
+    monkeypatch.setattr(zipfile.ZipFile, "write", measure)
+    try:
+        fixture_worker(config, store, tmp_path, media_fixtures[1], "gallery_large").run_once()
+        assert store.get(job["id"])["status"] == "success"
+        assert len(peaks) == 10
+        assert max(peaks) < 2 * 1024**3
+    finally:
+        occupied.unlink()
+        store.cleanup(job["id"])
