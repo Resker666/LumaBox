@@ -35,3 +35,26 @@ def test_blob_is_not_a_downloadable_resource():
     with pytest.raises(LumaBoxError, match="UNSUPPORTED_MEDIA"):
         extract_work({"work_id": ID, "kind": "video", "scope_confirmed": True, "count": 1,
                       "resources": [{"url": "blob:example", "order": 1, "role": "video"}]}, ID)
+
+
+def test_observed_gallery_default_image_is_pending_media(gallery):
+    gallery["resources"][0]["url"] = "https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/ies/douyin_web/media/douyinDefault.ee9da4401be3dae0.png"
+    with pytest.raises(LumaBoxError, match="UNSUPPORTED_MEDIA"):
+        extract_work(gallery, ID)
+
+
+@pytest.mark.parametrize("url", [
+    "https://lf-douyin-pc-web.douyinstatic.com/other.png",
+    "https://lf-douyin-pc-web.douyinstatic.com.evil.test/obj/douyin-pc-web/ies/douyin_web/media/douyinDefault.ee9da4401be3dae0.png",
+])
+def test_other_static_hosts_or_assets_are_not_media(gallery, url):
+    gallery["resources"][0]["url"] = url
+    with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
+        extract_work(gallery, ID)
+
+
+def test_default_image_does_not_hide_a_different_unverified_host(gallery):
+    gallery["resources"][0]["url"] = "https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/ies/douyin_web/media/douyinDefault.ee9da4401be3dae0.png"
+    gallery["resources"][1]["url"] = "https://unverified.example/image.jpeg"
+    with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
+        extract_work(gallery, ID)

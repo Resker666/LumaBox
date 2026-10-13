@@ -50,6 +50,10 @@ python3 -m venv .venv
 
 媒体提取诊断还包括 `scope_confirmed`（作品区域确认）、`identity_source`（DOM 身份来源）和 `media_schemes`（媒体协议）。普通登录推广和“登录后发表评论”不算观看限制。若作品区域已确认但来源持续为 `blob`，当前实现只能有界等待普通 HTTPS 来源，届时仍没有来源会返回 `UNSUPPORTED_MEDIA`。专用详情页定位和登录误判修复见[最新诊断](docs/validation/2026-10-13-detail-page-extraction.md)。
 
+图集在加载初期可能让所有前景元素引用同一张 `douyinDefault` 静态默认图。程序识别已实际观察到的默认图并在原45秒资源时限内等待替换；它不能算作作品图片，也不会扩展媒体域名白名单。具体证据见[默认图和持续 blob 分析](docs/validation/2026-10-13-blob-and-gallery-placeholder.md)。
+
+浏览器加载失败的诊断自动包含 `media_responses`：正常页面媒体响应的主机、请求类型、HTTP 状态、内容类型、文件格式提示、是否范围响应、总字节数（响应头可用时）、首个响应样本大小及同组次数。最多保留20组，`media_response_count` 为观察总数，`media_response_truncated` 表示有省略。它们不含完整地址、查询、Cookie或响应正文，只提供下一步分析的证据，不能证明响应属于目标作品或完整文件。
+
 ## 验证
 
 ```powershell

@@ -18,3 +18,5 @@
 - 视频详情区使用 `[data-e2e="video-detail"]`，实际观察到 `div` 标签。唯一 `.video-detail-container[data-e2e="player-container"]` 的 `video_<id>` 语义类提供作品 ID，没有活动 feed 祖先。内部唯一视频来源持续为 blob，readyState=4、时长124.6秒，没有 source 子元素提供 HTTPS。
 - 图集详情区使用 `[data-e2e="note-detail"]`，唯一播放器与 `.noteSideBarContainer` 为同区域不同分支；侧栏唯一 `[data-e2e="feed-active-video"][data-e2e-vid]` 提供实际作品 ID，不是播放器祖先。
 - 新定位方式只读复查得到图集 ID 7695689642767235187、12个前景 HTTPS 来源及完整几何序号1～12；视频 ID 7686430330920075249、单个 blob 来源。仅用于 DOM 依据，不能替代独立 CLI 下载验收。详见[本轮诊断](2026-10-13-detail-page-extraction.md)。
+
+用户19:49/19:50复测后的加载阶段补充：重新加载同一授权图集，12个前景 img 最初全部引用静态默认图 `lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/ies/douyin_web/media/douyinDefault.ee9da4401be3dae0.png`，complete=true，尺寸2416×1430；随后替换为 douyinpic.com 的12张作品图片。因此图片 complete、节点总数和HTTPS不能单独证明作品图片已经准备好。当前CLI会在这个阶段提前拒绝默认图域名，详见[持续blob和图集默认图分析](2026-10-13-blob-and-gallery-placeholder.md)。

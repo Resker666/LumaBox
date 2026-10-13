@@ -13,6 +13,9 @@ from .proxy import PublicProxy
 from .urls import validate_page_url, page_identity, validate_media_url
 
 RESOURCE_WAIT = 45.0
+MEDIA_TYPES = frozenset({"video/mp4", "video/webm", "video/mp2t", "audio/mp4", "audio/mpeg", "audio/aac",
+                        "application/dash+xml", "application/vnd.apple.mpegurl", "application/x-mpegurl"})
+MEDIA_EXTENSIONS = frozenset({"mp4", "webm", "m4s", "m4a", "aac", "ts", "mpd", "m3u8"})
 
 
 def _diagnostic_host(url):
@@ -45,6 +48,9 @@ class BrowserSession:
         self.main_frame_id = None
         self.navigation_hosts = set()
         self.blocked_documents = []
+        self.media_responses = []
+        self.media_response_count = 0
+        self.media_response_truncated = False
         self.diagnostics = {"stage": "browser_start"}
 
     async def __aenter__(self):
@@ -102,12 +108,63 @@ class BrowserSession:
             pass
 
     def _response(self, response):
-        if response.request.is_navigation_request() and response.request.frame == self.page.main_frame:
+        if response.request.frame != self.page.main_frame:
+            return
+        if response.request.is_navigation_request():
             self.http_status = response.status
             try:
                 check_status(response.status)
             except LumaBoxError as exc:
                 self.error = exc
+        self._observe_media_response(response)
+
+    def _observe_media_response(self, response):
+        resource_type = response.request.resource_type
+        if resource_type not in {"media", "fetch", "xhr"}:
+            return
+        host = _diagnostic_host(response.url)
+        if not host:
+            return
+        headers = response.headers
+        content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        is_media = (content_type in MEDIA_TYPES or content_type.startswith(("video/", "audio/")) or resource_type == "media")
+        if not is_media and content_type == "application/octet-stream":
+            try:
+                validate_media_url(response.url)
+                is_media = True
+            except LumaBoxError:
+                pass
+        if not is_media:
+            return
+        safe_type = content_type if content_type in MEDIA_TYPES else (
+            "video/other" if content_type.startswith("video/") else
+            "audio/other" if content_type.startswith("audio/") else
+            "application/octet-stream" if content_type == "application/octet-stream" else "unknown")
+        extension = urlsplit(response.url).path.rsplit(".", 1)[-1].lower()
+        hint = extension if extension in MEDIA_EXTENSIONS else "unknown"
+        length = headers.get("content-length", "")
+        sample_bytes = int(length) if re.fullmatch(r"[0-9]{1,20}", length) else None
+        byte_range = re.fullmatch(r"bytes ([0-9]{1,20})-([0-9]{1,20})/([0-9]{1,20}|\*)", headers.get("content-range", ""))
+        total_bytes = None
+        if byte_range and byte_range[3] != "*":
+            start, end, total = map(int, byte_range.groups())
+            if 0 <= start <= end < total:
+                total_bytes = total
+        # These describe normal page responses, not verified target resources.
+        # Only bounded, sanitized metadata is retained; no URLs or bodies.
+        item = {"host": host, "resource_type": resource_type, "status": response.status,
+                "content_type": safe_type, "format_hint": hint, "ranged": response.status == 206 or bool(byte_range),
+                "total_bytes": total_bytes, "sample_bytes": sample_bytes, "count": 1}
+        self.media_response_count += 1
+        keys = ("host", "resource_type", "status", "content_type", "format_hint", "ranged", "total_bytes")
+        for existing in self.media_responses:
+            if all(existing[key] == item[key] for key in keys):
+                existing["count"] += 1
+                return
+        if len(self.media_responses) < 20:
+            self.media_responses.append(item)
+        else:
+            self.media_response_truncated = True
 
     def _check_errors(self, initial_host, navigation_failed=False):
         if self.error:

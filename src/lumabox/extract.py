@@ -2,7 +2,7 @@ import re
 
 from .errors import LumaBoxError
 from .models import Work, MediaResource
-from .urls import validate_media_url
+from .urls import https_parts, validate_media_url
 
 # Based on observed Douyin detail DOM on 2026-10-12/13. No application state is read.
 DOM_SNAPSHOT = r"""({work_id, kind}) => {
@@ -90,6 +90,14 @@ def detect_access(text: str, has_media: bool) -> None:
         raise LumaBoxError("AUTH_REQUIRED", "This work requires an account session")
 
 
+def _is_default_gallery_image(url: str) -> bool:
+    # Observed before the real foreground images load on 2026-10-13.
+    # This is a pending state, not an additional allowed download host.
+    parts = https_parts(url)
+    return (parts.hostname == "lf-douyin-pc-web.douyinstatic.com" and
+            parts.path == "/obj/douyin-pc-web/ies/douyin_web/media/douyinDefault.ee9da4401be3dae0.png")
+
+
 def extract_work(snapshot: dict, expected_id: str) -> Work:
     if snapshot.get("work_id") != expected_id or not snapshot.get("scope_confirmed"):
         raise LumaBoxError("UNSUPPORTED_MEDIA", "Target work region could not be confirmed")
@@ -104,10 +112,16 @@ def extract_work(snapshot: dict, expected_id: str) -> Work:
     if len(entries) != count or sorted(r.get("order", 0) for r in entries) != list(range(1, count + 1)):
         raise LumaBoxError("UNSUPPORTED_MEDIA", "The complete ordered work was not available")
     resources = []
+    has_placeholder = False
     for entry in sorted(entries, key=lambda r: r["order"]):
         url = entry.get("url", "")
         if not url.startswith("https://"):
             raise LumaBoxError("UNSUPPORTED_MEDIA", "A normal HTTPS media resource is not available")
+        if kind == "gallery" and _is_default_gallery_image(url):
+            has_placeholder = True
+            continue
         validate_media_url(url)
         resources.append(MediaResource(url, entry["order"]))
+    if has_placeholder:
+        raise LumaBoxError("UNSUPPORTED_MEDIA", "Gallery images are still showing the site's default placeholder")
     return Work(expected_id, kind, tuple(resources))

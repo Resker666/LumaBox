@@ -12,6 +12,7 @@ from lumabox.urls import parse_input
 
 VIDEO_ID = "7686430330920075249"
 GALLERY_ID = "7695689642767235187"
+DEFAULT_IMAGE = "https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/ies/douyin_web/media/douyinDefault.ee9da4401be3dae0.png"
 
 
 def video_detail(source="https://v1.douyinvod.com/a.mp4"):
@@ -146,3 +147,34 @@ async def test_persistent_blob_reports_resource_limitation_and_safe_diagnostics(
         assert session.diagnostics["scope_confirmed"] is True
         assert session.diagnostics["media_schemes"] == ["blob"]
         assert "private-token" not in str(session.diagnostics)
+
+
+@pytest.mark.parametrize("default_count", [1, 2])
+async def test_gallery_waits_for_default_images_to_be_replaced(monkeypatch, default_count):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    monkeypatch.setattr(browser_module, "RESOURCE_WAIT", 3)
+    html = gallery_detail().replace("https://p3.douyinpic.com/a.jpeg", DEFAULT_IMAGE)
+    if default_count == 2:
+        html = html.replace("https://p3.douyinpic.com/b.jpeg", DEFAULT_IMAGE)
+    html += '''<script>setTimeout(()=>{
+      const imgs=document.querySelectorAll('.note-detail-container img.o0KibnKo');
+      imgs[0].src='https://p3.douyinpic.com/a.jpeg';
+      imgs[1].src='https://p3.douyinpic.com/b.jpeg';
+    },500)</script>'''
+    async with BrowserSession(headless=True) as session:
+        await session.context.route("**/*", lambda route: route.fulfill(status=200,
+            content_type="text/html; charset=utf-8", body=html) if route.request.resource_type == "document" else route.abort())
+        work = await session.load(parse_input(f"https://www.douyin.com/note/{GALLERY_ID}"))
+        assert [r.url for r in work.resources] == ["https://p3.douyinpic.com/a.jpeg", "https://p3.douyinpic.com/b.jpeg"]
+
+
+async def test_persistent_gallery_default_images_fail_with_bounded_wait(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    monkeypatch.setattr(browser_module, "RESOURCE_WAIT", 0.4)
+    html = gallery_detail().replace("https://p3.douyinpic.com/a.jpeg", DEFAULT_IMAGE)
+    async with BrowserSession(headless=True) as session:
+        await session.context.route("**/*", lambda route: route.fulfill(status=200,
+            content_type="text/html; charset=utf-8", body=html) if route.request.resource_type == "document" else route.abort())
+        with pytest.raises(LumaBoxError, match="UNSUPPORTED_MEDIA"):
+            await session.load(parse_input(f"https://www.douyin.com/note/{GALLERY_ID}"))
+        assert "placeholder" in session.diagnostics["reason"]

@@ -130,6 +130,10 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
         blocked = getattr(session, "blocked_documents", [])
         if blocked:
             result["diagnostics"]["blocked_documents"] = blocked
+        result["diagnostics"].update(
+            media_responses=getattr(session, "media_responses", []),
+            media_response_count=getattr(session, "media_response_count", 0),
+            media_response_truncated=getattr(session, "media_response_truncated", False))
     result.update(status="failed", actual_count=0, files=[], bytes=0, checks={"full_decode": False}, output_directory=None)
     try:
         root.mkdir(parents=True, exist_ok=True)
