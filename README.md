@@ -46,6 +46,8 @@ python3 -m venv .venv
 
 常见错误：`INVALID_INPUT` 输入不支持；`UNSAFE_TARGET` 域名/目的地址/重定向不符合规则；`AUTH_REQUIRED` 需登录；`CHALLENGE_REQUIRED` 访问验证；`BLOCKED` 拒绝访问；`RATE_LIMITED` 限流；`RESOURCE_TIMEOUT` 超时；`UNSUPPORTED_MEDIA` 无法确认完整媒体；`SIZE_LIMIT` 超限；`DOWNLOAD_FAILED` 下载或写入失败；`VERIFY_FAILED` 文件无法完整解码；`DEPENDENCY_MISSING` 浏览器/FFmpeg 安装或文件不可用。
 
+失败 JSON 的 `diagnostics` 记录阶段，例如 `dns_resolution`、`page_navigation`、`media_extraction`、`media_transfer`，并在浏览器阶段提供固定原因及相关域名；不会包含完整签名地址或 Cookie。HTTP 200 只说明主页面有成功响应，不能证明媒体已经提取或下载。被拒绝的子框架仍会阻断并记录，但不会单独使有效主作品失败。正常网络下 HTTP 200 后失败的分析见[诊断记录](docs/validation/2026-10-13-http-200-unsafe-target.md)。
+
 ## 验证
 
 ```powershell

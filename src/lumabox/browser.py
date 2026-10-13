@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
@@ -12,6 +13,14 @@ from .proxy import PublicProxy
 from .urls import validate_page_url, page_identity, validate_media_url
 
 RESOURCE_WAIT = 45.0
+
+
+def _diagnostic_host(url):
+    try:
+        host = urlsplit(url).hostname
+        return host if host and re.fullmatch(r"[a-z0-9.-]{1,253}", host) else None
+    except ValueError:
+        return None
 
 
 class NavigationGuard:
@@ -33,6 +42,10 @@ class BrowserSession:
         self.http_status = None
         self.guard = NavigationGuard()
         self.stack = AsyncExitStack()
+        self.main_frame_id = None
+        self.navigation_hosts = set()
+        self.blocked_documents = []
+        self.diagnostics = {"stage": "browser_start"}
 
     async def __aenter__(self):
         try:
@@ -48,6 +61,7 @@ class BrowserSession:
             self.page.on("response", self._response)
             cdp = await self.context.new_cdp_session(self.page)
             self.cdp = cdp
+            self.main_frame_id = (await cdp.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
             cdp.on("Fetch.requestPaused", self._document)
             await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"}]})
             return self
@@ -65,11 +79,23 @@ class BrowserSession:
             await page.close()
 
     async def _document(self, event):
+        is_main = event.get("frameId") == self.main_frame_id
+        host = _diagnostic_host(event["request"]["url"])
         try:
             self.guard.check(event["request"]["url"], event.get("redirectedRequestId"), event["requestId"])
+            if is_main:
+                self.navigation_hosts.add(host)
             await self.cdp.send("Fetch.continueRequest", {"requestId": event["requestId"]})
         except LumaBoxError as exc:
-            self.error = exc
+            detail = {"stage": "page_navigation", "reason": exc.message,
+                      "host": host, "frame": "main" if is_main else "child"}
+            if len(self.blocked_documents) < 10:
+                self.blocked_documents.append(detail)
+            # A blocked embedded document remains blocked. Only a rejected main
+            # navigation invalidates the target work's entire browsing session.
+            if is_main:
+                self.error = exc
+                self.diagnostics = detail.copy()
             await self.cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "BlockedByClient"})
         except PlaywrightError:
             # Context shutdown can cancel paused requests.
@@ -83,27 +109,38 @@ class BrowserSession:
             except LumaBoxError as exc:
                 self.error = exc
 
-    def _check_errors(self, initial_host):
+    def _check_errors(self, initial_host, navigation_failed=False):
         if self.error:
             raise self.error
-        for failure in self.proxy.failures:
-            if failure["host"] == initial_host:
-                raise LumaBoxError(failure["code"], "Browser network connection failed")
+        if navigation_failed:
+            for failure in self.proxy.failures:
+                if failure["host"] in self.navigation_hosts | {initial_host}:
+                    self.diagnostics = {"stage": "page_navigation", "reason": "Browser network connection failed",
+                                        "host": failure["host"]}
+                    raise LumaBoxError(failure["code"], "Browser network connection failed")
 
     async def load(self, link):
+        self.diagnostics = {"stage": "input_policy"}
         validate_page_url(link.url)
         host = urlsplit(link.url).hostname
-        await asyncio.to_thread(resolve_public, host)
+        self.diagnostics = {"stage": "dns_resolution", "host": host}
+        try:
+            await asyncio.to_thread(resolve_public, host)
+        except LumaBoxError as exc:
+            self.diagnostics["reason"] = exc.message
+            raise
+        self.diagnostics = {"stage": "page_navigation", "host": host}
         try:
             await self.page.goto(link.url, wait_until="domcontentloaded", timeout=30000)
         except PlaywrightError:
-            self._check_errors(host)
+            self._check_errors(host, navigation_failed=True)
             raise LumaBoxError("RESOURCE_TIMEOUT", "The work page could not load in 30 seconds") from None
         deadline = time.monotonic() + RESOURCE_WAIT
         last = None
         expected_identity = (link.work_id, link.kind) if link.work_id else None
         while time.monotonic() < deadline:
             self._check_errors(host)
+            self.diagnostics = {"stage": "target_identity"}
             identity = page_identity(self.page.url)
             if identity:
                 work_id, kind = identity
@@ -111,12 +148,17 @@ class BrowserSession:
                     expected_identity = identity
                 if identity != expected_identity:
                     raise LumaBoxError("UNSUPPORTED_MEDIA", "The browser switched to a different work")
+                self.diagnostics = {"stage": "media_extraction"}
                 snapshot = await self.page.evaluate(DOM_SNAPSHOT, {"work_id": work_id, "kind": kind})
+                self._check_errors(host)
+                self.diagnostics["resource_hosts"] = sorted({host for r in snapshot["resources"]
+                    if (host := _diagnostic_host(r.get("url", "")))})
                 detect_access(snapshot["text"], any(r.get("url", "").startswith("https://") for r in snapshot["resources"]))
                 try:
                     return extract_work(snapshot, work_id)
                 except LumaBoxError as exc:
                     if exc.code != "UNSUPPORTED_MEDIA":
+                        self.diagnostics["reason"] = exc.message
                         raise
                     last = exc
             else:
@@ -124,6 +166,7 @@ class BrowserSession:
                 detect_access(text[:20000], False)
             await asyncio.sleep(0.25)
         if last:
+            self.diagnostics["reason"] = last.message
             raise last
         raise LumaBoxError("RESOURCE_TIMEOUT", "Target resources were not available in 45 seconds")
 

@@ -51,6 +51,7 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
     root = output.resolve()
     temporary = None
     session = None
+    stage = "input"
     cancel = threading.Event()
     result = {"run_id": run_id, "date": datetime.now(timezone.utc).isoformat(), "status": "failed",
               "work_id": None, "kind": None, "metadata_parsed": False, "expected_count": 0,
@@ -59,9 +60,12 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
     try:
         link = parse_input(text)
         result.update(work_id=link.work_id, kind=link.kind)
+        stage = "output_setup"
         root.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=f".partial-{run_id}-", dir=root))
+        stage = "browser_start"
         async with BrowserSession(headless=headless) as session:
+            stage = "browser_load"
             work = await session.load(link)
             result.update(work_id=work.work_id, kind=work.kind, metadata_parsed=True, expected_count=len(work.resources))
             loop = asyncio.get_running_loop()
@@ -82,13 +86,16 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
                 limit = VIDEO_LIMIT if work.kind == "video" else min(IMAGE_LIMIT, GALLERY_LIMIT - result["bytes"])
                 if limit <= 0:
                     raise LumaBoxError("SIZE_LIMIT", "Gallery exceeds the total size limit")
+                stage = "media_transfer"
                 count = await _blocking(download_resource, resource, path, headers, limit, cancel, cancel=cancel)
                 if count > limit:
                     raise LumaBoxError("SIZE_LIMIT", "Media exceeds the size limit")
+                stage = "media_verification"
                 verified = await _blocking(verify_file, path, work.kind, cancel=cancel)
                 result["files"].append(asdict(verified))
                 result["bytes"] += verified.bytes
         result["http_status"] = session.http_status
+        stage = "publication"
         destination = root / f"{work.work_id}-{run_id}"
         result.update(status="success", actual_count=len(result["files"]), output_directory=str(destination),
                       checks={"full_decode": True}, report_path=str(destination / "report.json"))
@@ -117,6 +124,12 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
                 result["cleanup_failed"] = True
     if session is not None:
         result["http_status"] = getattr(session, "http_status", None)
+    result["diagnostics"] = {"stage": stage}
+    if stage == "browser_load" and session is not None:
+        result["diagnostics"].update(getattr(session, "diagnostics", {}))
+        blocked = getattr(session, "blocked_documents", [])
+        if blocked:
+            result["diagnostics"]["blocked_documents"] = blocked
     result.update(status="failed", actual_count=0, files=[], bytes=0, checks={"full_decode": False}, output_directory=None)
     try:
         root.mkdir(parents=True, exist_ok=True)

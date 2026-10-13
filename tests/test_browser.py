@@ -7,6 +7,8 @@ from lumabox.errors import LumaBoxError
 from lumabox.extract import DOM_SNAPSHOT, extract_work, detect_access
 from lumabox.urls import parse_input
 import lumabox.browser as browser_module
+from lumabox.runner import run_download
+import json
 
 
 def test_every_document_hop_is_checked():
@@ -161,3 +163,77 @@ async def test_gallery_counter_anchors_positions_at_second_image():
             assert [r.url for r in work.resources] == ["https://p3.douyinpic.com/a.jpeg", "https://p3.douyinpic.com/b.jpeg"]
         finally:
             await browser.close()
+
+
+async def test_blocked_child_document_does_not_fail_valid_main_work(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    html = '''<iframe src="https://sso.douyin.com/fixture"></iframe>
+    <div data-e2e="feed-active-video" data-e2e-vid="7686430330920075249" style="width:300px;height:200px"><div class="basePlayerContainer"><video src="blob:fixture"></video></div></div>
+    <script>setTimeout(()=>{document.querySelector('video').src='https://v1.douyinvod.com/a.mp4'},400)</script>'''
+    child_decisions = []
+    original = BrowserSession._document
+    async def observe(session, event):
+        await original(session, event)
+        if event["request"]["url"].startswith("https://sso.douyin.com/"):
+            child_decisions.append(event["frameId"])
+    monkeypatch.setattr(BrowserSession, "_document", observe)
+    async with BrowserSession(headless=True) as session:
+        async def serve(route):
+            if route.request.resource_type == "document" and route.request.url.startswith("https://www.douyin.com/"):
+                await route.fulfill(status=200, content_type="text/html", body=html)
+            else:
+                await route.abort()
+        await session.context.route("**/*", serve)
+        work = await session.load(parse_input("https://www.douyin.com/video/7686430330920075249"))
+        assert session.http_status == 200
+        assert len(child_decisions) == 1
+        assert work.work_id == "7686430330920075249"
+
+
+async def test_background_proxy_failure_does_not_fail_loaded_main_work(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    original = BrowserSession._response
+    def with_background_failure(self, response):
+        original(self, response)
+        if self.http_status == 200:
+            self.proxy.failures.append({"host": "www.douyin.com", "code": "UNSAFE_TARGET"})
+    monkeypatch.setattr(BrowserSession, "_response", with_background_failure)
+    html = '<div data-e2e="feed-active-video" data-e2e-vid="7686430330920075249" style="width:300px;height:200px"><div class="basePlayerContainer"><video src="https://v1.douyinvod.com/a.mp4"></video></div></div>'
+    async with BrowserSession(headless=True) as session:
+        await session.context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=html) if route.request.resource_type == "document" else route.abort())
+        work = await session.load(parse_input("https://www.douyin.com/video/7686430330920075249"))
+        assert session.http_status == 200
+        assert work.work_id == "7686430330920075249"
+
+
+@pytest.mark.parametrize("failure", ["main_redirect", "media_host"])
+async def test_failure_report_identifies_policy_stage_without_signed_urls(monkeypatch, tmp_path, failure):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    if failure == "main_redirect":
+        original = BrowserSession._document
+        async def redirect_first(self, event):
+            if event["request"]["url"].startswith("https://www.douyin.com/video/"):
+                self.guard.check(event["request"]["url"], None, event["requestId"])
+                await self.cdp.send("Fetch.fulfillRequest", {"requestId": event["requestId"], "responseCode": 302,
+                    "responseHeaders": [{"name": "Location", "value": "https://evil.test/private?token=secret"}, {"name": "Content-Length", "value": "0"}]})
+            else:
+                await original(self, event)
+        monkeypatch.setattr(BrowserSession, "_document", redirect_first)
+    else:
+        original_enter = BrowserSession.__aenter__
+        async def fixture_enter(session):
+            await original_enter(session)
+            html = '<div data-e2e="feed-active-video" data-e2e-vid="7686430330920075249" style="width:300px;height:200px"><div class="basePlayerContainer"><video src="https://unverified.example/a.mp4?signature=secret"></video></div></div>'
+            await session.context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=html) if route.request.resource_type == "document" else route.abort())
+            return session
+        monkeypatch.setattr(BrowserSession, "__aenter__", fixture_enter)
+    result = await run_download("https://www.douyin.com/video/7686430330920075249", tmp_path, True)
+    assert result["error"] == "UNSAFE_TARGET"
+    expected_stage = "page_navigation" if failure == "main_redirect" else "media_extraction"
+    assert result["diagnostics"]["stage"] == expected_stage
+    if failure == "main_redirect":
+        assert result["diagnostics"]["host"] == "evil.test"
+        assert result["diagnostics"]["frame"] == "main"
+    else:
+        assert result["diagnostics"]["resource_hosts"] == ["unverified.example"]
+    assert all(secret not in json.dumps(result) for secret in ["token=", "signature=", "secret", "/private", "/a.mp4"])
