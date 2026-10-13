@@ -93,7 +93,7 @@ class BrowserSession:
     async def load(self, link):
         validate_page_url(link.url)
         host = urlsplit(link.url).hostname
-        await asyncio.wait_for(asyncio.to_thread(resolve_public, host), 15)
+        await asyncio.to_thread(resolve_public, host)
         try:
             await self.page.goto(link.url, wait_until="domcontentloaded", timeout=30000)
         except PlaywrightError:
@@ -101,12 +101,15 @@ class BrowserSession:
             raise LumaBoxError("RESOURCE_TIMEOUT", "The work page could not load in 30 seconds") from None
         deadline = time.monotonic() + RESOURCE_WAIT
         last = None
+        expected_identity = (link.work_id, link.kind) if link.work_id else None
         while time.monotonic() < deadline:
             self._check_errors(host)
             identity = page_identity(self.page.url)
             if identity:
                 work_id, kind = identity
-                if link.work_id and (link.work_id != work_id or link.kind != kind):
+                if expected_identity is None:
+                    expected_identity = identity
+                if identity != expected_identity:
                     raise LumaBoxError("UNSUPPORTED_MEDIA", "The browser switched to a different work")
                 snapshot = await self.page.evaluate(DOM_SNAPSHOT, {"work_id": work_id, "kind": kind})
                 detect_access(snapshot["text"], any(r.get("url", "").startswith("https://") for r in snapshot["resources"]))

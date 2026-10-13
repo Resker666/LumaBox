@@ -16,6 +16,12 @@ def server(monkeypatch):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             cookies.append((self.path, self.headers.get("Cookie")))
+            if callable(routes[self.path]):
+                try:
+                    routes[self.path](self.wfile)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
+                return
             status, headers, body = routes[self.path]
             self.send_response(status)
             for name, value in headers.items():
@@ -33,7 +39,7 @@ def server(monkeypatch):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-    monkeypatch.setattr(transfer, "resolve_public", lambda host: ("93.184.216.34",))
+    monkeypatch.setattr(transfer, "resolve_public", lambda host, **kwargs: ("93.184.216.34",))
     monkeypatch.setattr(transfer, "PinnedHTTPSConnection", lambda host, ip, timeout: http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=timeout))
     yield routes, cookies
     httpd.shutdown()
@@ -128,3 +134,50 @@ def test_close_delimited_response_resets_socket_to_remaining_deadline(server, tm
     with pytest.raises(LumaBoxError, match="RESOURCE_TIMEOUT"):
         download(tmp_path / "out.jpg")
     assert time.monotonic() - start < 0.6
+
+
+@pytest.mark.parametrize("phase", ["headers", "chunk_size", "trailers"])
+def test_absolute_deadline_bounds_http_framing(server, tmp_path, monkeypatch, phase):
+    monkeypatch.setattr(transfer, "TOTAL_TIMEOUT", 0.2)
+    def trickle(writer):
+        if phase == "headers":
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nX-Slow: ")
+        else:
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nTransfer-Encoding: chunked\r\n\r\n")
+            if phase == "trailers":
+                writer.write(b"1\r\nx\r\n0\r\nX-Slow: ")
+        for _ in range(12):
+            writer.write(b"1" if phase == "chunk_size" else b"x")
+            writer.flush()
+            time.sleep(0.05)
+        writer.write(b"\r\n\r\n")
+    server[0]["/start"] = trickle
+    target = tmp_path / "out.jpg"
+    start = time.monotonic()
+    with pytest.raises(LumaBoxError, match="RESOURCE_TIMEOUT"):
+        download(target)
+    assert time.monotonic() - start < 0.4
+    assert not target.exists()
+
+
+def test_cancel_interrupts_trickled_headers(server, tmp_path):
+    def trickle(writer):
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nX-Slow: ")
+        for _ in range(12):
+            writer.write(b"x")
+            writer.flush()
+            time.sleep(0.05)
+        writer.write(b"\r\n\r\n")
+    server[0]["/start"] = trickle
+    cancel = threading.Event()
+    timer = threading.Timer(0.15, cancel.set)
+    timer.start()
+    target = tmp_path / "out.jpg"
+    start = time.monotonic()
+    try:
+        with pytest.raises(LumaBoxError, match="INTERRUPTED"):
+            transfer.download_resource(MediaResource("https://p3.douyinpic.com/start", 1), target, lambda url: {}, 100, cancel)
+        assert time.monotonic() - start < 0.4
+        assert not target.exists()
+    finally:
+        timer.cancel()

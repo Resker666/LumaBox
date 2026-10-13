@@ -100,3 +100,64 @@ async def test_cdp_checks_real_redirect_before_unallowed_navigation(monkeypatch)
     async with BrowserSession(headless=True) as session:
         with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
             await session.load(parse_input("https://www.douyin.com/video/7686430330920075249"))
+
+
+async def test_short_link_cannot_switch_work_while_waiting_for_media(monkeypatch):
+    monkeypatch.setattr(browser_module, "resolve_public", lambda host: ("93.184.216.34",))
+    html = '''<div data-e2e="feed-active-video" data-e2e-vid="7686430330920075249" style="width:300px;height:200px"><div class="basePlayerContainer"><video src="blob:fixture"></video></div></div>
+    <script>
+    history.replaceState(null,'','https://v.douyin.com/video/7686430330920075249');
+    setTimeout(()=>{
+      history.replaceState(null,'','https://v.douyin.com/video/7663050581984430449');
+      document.querySelector('[data-e2e-vid]').setAttribute('data-e2e-vid','7663050581984430449');
+      document.querySelector('video').src='https://v1.douyinvod.com/other.mp4';
+    },600);
+    </script>'''
+    async with BrowserSession(headless=True) as session:
+        await session.context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=html) if route.request.resource_type == "document" else route.abort())
+        with pytest.raises(LumaBoxError, match="UNSUPPORTED_MEDIA"):
+            await session.load(parse_input("https://v.douyin.com/fixture/"))
+
+
+@pytest.mark.parametrize("defect", ["wrong_owner", "no_owner", "rotated", "clone", "unproven_layout"])
+async def test_gallery_dom_rejects_wrong_identity_or_unproven_positions(defect):
+    html = Path("tests/fixtures/gallery.html").read_text(encoding="utf-8")
+    if defect == "no_owner":
+        html = html.replace('data-e2e-vid="7695689642767235187"', '')
+    elif defect == "wrong_owner":
+        html = html.replace('data-e2e-vid="7695689642767235187"', 'data-e2e-vid="7686430330920075249"')
+    if defect == "rotated":
+        # The viewport is at the last physical slot, but the counter says first:
+        # a wrapped/rotated carousel is not a proven complete linear sequence.
+        html += '<style>.track{transform:translateX(-400px)}</style>'
+    if defect == "clone":
+        html = html.replace('class="dySwiperSlide"', 'class="dySwiperSlide swiper-slide-duplicate"', 1)
+    if defect == "unproven_layout":
+        html += '<style>.track{display:block}</style>'
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.route("**/*", lambda route: route.abort())
+            await page.set_content(html)
+            snapshot = await page.evaluate(DOM_SNAPSHOT, {"work_id": "7695689642767235187", "kind": "gallery"})
+            with pytest.raises(LumaBoxError, match="UNSUPPORTED_MEDIA"):
+                extract_work(snapshot, "7695689642767235187")
+        finally:
+            await browser.close()
+
+
+async def test_gallery_counter_anchors_positions_at_second_image():
+    html = Path("tests/fixtures/gallery.html").read_text(encoding="utf-8")
+    html = html.replace('<span>1</span>', '<span>2</span>') + '<style>.track{transform:translateX(-400px)}</style>'
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.route("**/*", lambda route: route.abort())
+            await page.set_content(html)
+            snapshot = await page.evaluate(DOM_SNAPSHOT, {"work_id": "7695689642767235187", "kind": "gallery"})
+            work = extract_work(snapshot, "7695689642767235187")
+            assert [r.url for r in work.resources] == ["https://p3.douyinpic.com/a.jpeg", "https://p3.douyinpic.com/b.jpeg"]
+        finally:
+            await browser.close()

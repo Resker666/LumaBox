@@ -2,41 +2,91 @@
 
 import http.client
 import socket
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from .errors import LumaBoxError, check_status
-from .net import PinnedHTTPSConnection, resolve_public
+from .net import PinnedHTTPSConnection, resolve_public, bounded_call
 from .urls import validate_media_url
 
 IDLE_TIMEOUT = 15.0
 TOTAL_TIMEOUT = 180.0
 
 
+class _DownloadGuard:
+    """Interrupt blocked HTTP headers/chunk framing as well as body reads."""
+
+    def __init__(self, deadline, cancel):
+        self.deadline, self.cancel = deadline, cancel
+        self.conn = self.sock = None
+        self.code = None
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._watch, daemon=True)
+        self.thread.start()
+
+    def remaining(self):
+        code = self.code
+        if not code and self.cancel is not None and self.cancel.is_set():
+            code = "INTERRUPTED"
+        left = self.deadline - time.monotonic()
+        if not code and left <= 0:
+            code = "RESOURCE_TIMEOUT"
+        if code:
+            raise LumaBoxError(code, "Media operation stopped before completion")
+        return min(IDLE_TIMEOUT, left)
+
+    def set_connection(self, conn):
+        with self.lock:
+            self.conn, self.sock = conn, None
+
+    def capture_socket(self):
+        with self.lock:
+            self.sock = self.conn.sock
+
+    def _watch(self):
+        while not self.stop.wait(max(0, min(0.05, self.deadline - time.monotonic()))):
+            try:
+                self.remaining()
+            except LumaBoxError as exc:
+                with self.lock:
+                    self.code = exc.code
+                    sock = (self.conn.sock if self.conn else None) or self.sock
+                    if sock is not None:
+                        try:
+                            sock.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                return
+
+    def close(self):
+        self.stop.set()
+        self.thread.join()
+
+
 def download_resource(resource, path: Path, headers_for_url, max_bytes: int, cancel=None) -> int:
     deadline = time.monotonic() + TOTAL_TIMEOUT
+    guard = _DownloadGuard(deadline, cancel)
     url = resource.url
     created = False
-
-    def remaining():
-        if cancel is not None and cancel.is_set():
-            raise LumaBoxError("INTERRUPTED", "Download cancelled")
-        left = deadline - time.monotonic()
-        if left <= 0:
-            raise LumaBoxError("RESOURCE_TIMEOUT", "Media download exceeded its time limit")
-        return min(IDLE_TIMEOUT, left)
+    remaining = guard.remaining
 
     try:
         for hop in range(6):
             remaining()
             validate_media_url(url)
             parts = urlsplit(url)
-            ips = resolve_public(parts.hostname)
-            headers = headers_for_url(url)
+            ips = resolve_public(parts.hostname, timeout=remaining(), cancel=cancel)
+            headers = bounded_call(lambda: headers_for_url(url), remaining(), cancel)
             conn = PinnedHTTPSConnection(parts.hostname, ips[0], remaining())
+            guard.set_connection(conn)
             try:
+                remaining()
                 conn.request("GET", parts.path + ("?" + parts.query if parts.query else ""), headers=headers)
+                guard.capture_socket()
+                conn.sock.settimeout(remaining())
                 response = conn.getresponse()
                 remaining()
                 check_status(response.status)
@@ -86,8 +136,12 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
     except BaseException as exc:
         if created:
             path.unlink(missing_ok=True)
+        if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            remaining()
         if isinstance(exc, (LumaBoxError, KeyboardInterrupt, SystemExit)):
             raise
         if isinstance(exc, (socket.timeout, TimeoutError)):
             raise LumaBoxError("RESOURCE_TIMEOUT", "Media connection timed out") from None
         raise LumaBoxError("DOWNLOAD_FAILED", "Media could not be saved") from None
+    finally:
+        guard.close()

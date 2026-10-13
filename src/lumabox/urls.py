@@ -52,7 +52,7 @@ def page_identity(url: str) -> tuple[str, str] | None:
 
 
 def parse_input(text: str) -> InputLink:
-    matches = re.findall(r"https?://[^\s<>\"'，。；！）】]+", text)
+    matches = re.findall(r"https?://[^\s<>\"'，。；！）】]+", text, re.IGNORECASE)
     if len(matches) != 1:
         raise LumaBoxError("INVALID_INPUT", "Provide exactly one supported link")
     url = matches[0].rstrip(".,;!)]}")

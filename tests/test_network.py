@@ -1,4 +1,5 @@
 import socket
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -10,7 +11,7 @@ def dns_result(ip):
     return (socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))
 
 
-@pytest.mark.parametrize("ips", [[], ["127.0.0.1"], ["93.184.216.34", "10.0.0.1"], ["::ffff:192.168.1.1"], ["fec0::1"], ["192.0.0.8"]])
+@pytest.mark.parametrize("ips", [[], ["127.0.0.1"], ["93.184.216.34", "10.0.0.1"], ["::ffff:192.168.1.1"], ["fec0::1"], ["192.0.0.8"], ["4000::1"]])
 def test_rejects_any_non_public_answer(monkeypatch, ips):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [dns_result(ip) for ip in ips])
     with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
@@ -32,3 +33,14 @@ def test_tls_connects_to_pinned_ip_with_original_hostname(monkeypatch):
     assert conn.sock is wrapped
     assert dial.call_args.args[0] == ("93.184.216.34", 443)
     assert conn._context.wrap_socket.call_args.kwargs["server_hostname"] == "p3.douyinpic.com"
+
+
+def test_dns_lookup_has_absolute_time_limit(monkeypatch):
+    def slow_dns(*args, **kwargs):
+        time.sleep(0.5)
+        return [dns_result("93.184.216.34")]
+    monkeypatch.setattr(socket, "getaddrinfo", slow_dns)
+    start = time.monotonic()
+    with pytest.raises(LumaBoxError, match="RESOURCE_TIMEOUT"):
+        resolve_public("public.test", timeout=0.1)
+    assert time.monotonic() - start < 0.3

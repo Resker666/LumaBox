@@ -29,6 +29,8 @@ def test_single_link(text, kind, work_id):
     "https://www.douyin.com/user/123456789012345",
     "https://v.douyin.com/a/ https://v.douyin.com/b/",
     "https://v.douyin.com/a/ https://example.com",
+    "https://v.douyin.com/a/ HTTPS://v.douyin.com/b/",
+    "HtTpS://v.douyin.com/a/ http://example.com",
     "nothing",
 ])
 def test_rejects_ambiguous_or_unsafe_input(text):

@@ -9,26 +9,49 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
  const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
  const candidates = kind === 'gallery'
    ? Array.from(document.querySelectorAll('.note-detail-container[data-e2e="player-container"]'))
+       .filter(e => e.closest('[data-e2e="feed-active-video"][data-e2e-vid]')?.getAttribute('data-e2e-vid') === work_id)
    : Array.from(document.querySelectorAll('[data-e2e="feed-active-video"][data-e2e-vid]'))
        .filter(e => e.getAttribute('data-e2e-vid') === work_id);
  const roots = candidates.filter(visible);
  const root = roots.length === 1 ? roots[0] : null;
  const players = root ? Array.from(root.querySelectorAll('.basePlayerContainer')) : [];
  const player = players.length === 1 ? players[0] : null;
- const out = {work_id, kind, scope_confirmed: !!player, count: 0, resources: [], text: (document.body?.innerText || '').slice(0, 20000)};
+ const owner = root?.closest('[data-e2e="feed-active-video"][data-e2e-vid]');
+ const out = {work_id: owner?.getAttribute('data-e2e-vid') || null, kind, scope_confirmed: !!player, count: 0, resources: [], text: (document.body?.innerText || '').slice(0, 20000)};
  if (!player) return out;
  if (kind === 'video') {
    const videos = Array.from(player.querySelectorAll('video'));
    if (videos.length === 1) {out.count = 1; out.resources = [{url: videos[0].currentSrc || videos[0].src, order: 1, role: 'video'}];}
  } else {
    const counters = Array.from(root.querySelectorAll('*')).map(e => (e.textContent || '').trim())
-     .filter(t => /^\d+\s*\/\s*\d+$/.test(t)).map(t => Number(t.split('/')[1]));
-   const totals = [...new Set(counters)];
-   out.count = totals.length === 1 ? totals[0] : 0;
+     .filter(t => /^\d+\s*\/\s*\d+$/.test(t)).map(t => t.split('/').map(Number).join('/'));
+   const pairs = [...new Set(counters)];
+   if (pairs.length !== 1) return out;
+   const [current, total] = pairs[0].split('/').map(Number);
+   out.count = total;
    const slides = Array.from(player.querySelectorAll('.dySwiperSlide'));
-   out.resources = slides.map((slide, index) => {
+   const track = slides[0]?.parentElement;
+   const trackStyle = track && getComputedStyle(track);
+   const viewport = player.getBoundingClientRect();
+   // Observed non-looping horizontal layout: the counter independently anchors
+   // the viewport's slot. DOM enumeration does not establish image ordinals.
+   if (!track || current < 1 || current > total || slides.length !== total ||
+       track.children.length !== total || slides.some(s => s.parentElement !== track) ||
+       trackStyle.display !== 'flex' || trackStyle.flexDirection !== 'row' || trackStyle.direction !== 'ltr' ||
+       viewport.width <= 0 || viewport.height <= 0) return out;
+   out.resources = slides.map(slide => {
+     const bounds = slide.getBoundingClientRect(), style = getComputedStyle(slide);
+     const offset = (bounds.left - viewport.left) / viewport.width;
+     const order = current + Math.round(offset);
+     const declared = slide.getAttribute('data-swiper-slide-index');
+     if (Math.abs(offset - Math.round(offset)) > 0.002 ||
+         Math.abs(bounds.width - viewport.width) > 1 || Math.abs(bounds.top - viewport.top) > 1 ||
+         Math.abs(bounds.height - viewport.height) > 1 || style.order !== '0' || style.transform !== 'none' ||
+         slide.classList.contains('swiper-slide-duplicate') ||
+         (declared !== null && (!/^\d+$/.test(declared) || Number(declared) !== order - 1)))
+       return {url: '', order: 0, role: 'slide'};
      const foreground = Array.from(slide.querySelectorAll('img.o0KibnKo')).filter(i => i.parentElement?.parentElement === slide);
-     return {url: foreground.length === 1 ? foreground[0].currentSrc || foreground[0].src : '', order: index + 1, role: 'slide'};
+     return {url: foreground.length === 1 ? foreground[0].currentSrc || foreground[0].src : '', order, role: 'slide'};
    });
  }
  return out;
