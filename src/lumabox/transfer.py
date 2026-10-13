@@ -13,6 +13,9 @@ from .urls import validate_media_url
 
 IDLE_TIMEOUT = 15.0
 TOTAL_TIMEOUT = 180.0
+DIAGNOSTIC_TYPES = frozenset({"image/jpeg", "image/webp", "image/png", "image/avif", "image/gif", "image/heic",
+                             "video/mp4", "application/octet-stream", "binary/octet-stream", "text/html",
+                             "application/json", "text/plain"})
 
 
 class _DownloadGuard:
@@ -71,6 +74,7 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
     guard = _DownloadGuard(deadline, cancel)
     url = resource.url
     created = False
+    diagnostics = {"resource_order": resource.order}
     remaining = guard.remaining
 
     try:
@@ -89,6 +93,10 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
                 conn.sock.settimeout(remaining())
                 response = conn.getresponse()
                 remaining()
+                mime = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
+                safe_type = mime if mime in DIAGNOSTIC_TYPES else (
+                    "image/other" if mime.startswith("image/") else "video/other" if mime.startswith("video/") else "unknown")
+                diagnostics.update(host=parts.hostname, http_status=response.status, content_type=safe_type)
                 check_status(response.status)
                 if response.status in (301, 302, 303, 307, 308):
                     location = response.getheader("Location")
@@ -99,9 +107,8 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
                     continue
                 if response.status != 200:
                     raise LumaBoxError("DOWNLOAD_FAILED", "A complete media response was not returned")
-                mime = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
-                expected = "video/mp4" if path.suffix.lower() == ".mp4" else "image/jpeg"
-                if mime not in (expected, "application/octet-stream", "binary/octet-stream"):
+                expected = ("video/mp4",) if path.suffix.lower() == ".mp4" else ("image/jpeg", "image/webp")
+                if mime not in (*expected, "application/octet-stream", "binary/octet-stream"):
                     raise LumaBoxError("UNSUPPORTED_MEDIA", "The response is not a supported media type")
                 length = response.getheader("Content-Length")
                 if length is not None and not length.isdecimal():
@@ -137,11 +144,17 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
         if created:
             path.unlink(missing_ok=True)
         if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            remaining()
-        if isinstance(exc, (LumaBoxError, KeyboardInterrupt, SystemExit)):
+            try:
+                remaining()
+            except LumaBoxError as stopped:
+                exc = stopped
+        if isinstance(exc, LumaBoxError):
+            exc.diagnostics.update(diagnostics)
+            raise exc from None
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         if isinstance(exc, (socket.timeout, TimeoutError)):
-            raise LumaBoxError("RESOURCE_TIMEOUT", "Media connection timed out") from None
-        raise LumaBoxError("DOWNLOAD_FAILED", "Media could not be saved") from None
+            raise LumaBoxError("RESOURCE_TIMEOUT", "Media connection timed out", diagnostics=diagnostics) from None
+        raise LumaBoxError("DOWNLOAD_FAILED", "Media could not be saved", diagnostics=diagnostics) from None
     finally:
         guard.close()

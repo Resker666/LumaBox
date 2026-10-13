@@ -26,3 +26,19 @@ def test_truncated_video_fails_full_verification(tmp_path, media_fixtures):
     file.write_bytes(media_fixtures[0].read_bytes()[:100])
     with pytest.raises(LumaBoxError, match="VERIFY_FAILED"):
         verify_file(file, "video")
+
+
+def test_webp_is_decoded_and_named_by_bytes_even_when_url_says_jpeg(tmp_path, webp_fixture):
+    image = tmp_path / "01.jpg"
+    image.write_bytes(webp_fixture.read_bytes())
+    verified = verify_file(image, "gallery")
+    assert verified.name == "01.webp"
+    assert (verified.width, verified.height) == (64, 48)
+    assert verified.sha256 == hashlib.sha256(webp_fixture.read_bytes()).hexdigest()
+
+
+def test_truncated_webp_does_not_pass_signature_alone(tmp_path, webp_fixture):
+    image = tmp_path / "01.jpg"
+    image.write_bytes(webp_fixture.read_bytes()[:20])
+    with pytest.raises(LumaBoxError, match="VERIFY_FAILED"):
+        verify_file(image, "gallery")

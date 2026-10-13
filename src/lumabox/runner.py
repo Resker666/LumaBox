@@ -52,6 +52,7 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
     temporary = None
     session = None
     stage = "input"
+    failure_diagnostics = {}
     cancel = threading.Event()
     result = {"run_id": run_id, "date": datetime.now(timezone.utc).isoformat(), "status": "failed",
               "work_id": None, "kind": None, "metadata_parsed": False, "expected_count": 0,
@@ -92,6 +93,8 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
                     raise LumaBoxError("SIZE_LIMIT", "Media exceeds the size limit")
                 stage = "media_verification"
                 verified = await _blocking(verify_file, path, work.kind, cancel=cancel)
+                if verified.name != path.name:
+                    path.rename(temporary / verified.name)
                 result["files"].append(asdict(verified))
                 result["bytes"] += verified.bytes
         result["http_status"] = session.http_status
@@ -109,6 +112,7 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
         result["error"] = "INTERRUPTED"
     except LumaBoxError as exc:
         result["error"] = exc.code
+        failure_diagnostics = {"reason": exc.message, **exc.diagnostics}
     except Exception:
         result["error"] = "DOWNLOAD_FAILED"
     finally:
@@ -124,7 +128,7 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
                 result["cleanup_failed"] = True
     if session is not None:
         result["http_status"] = getattr(session, "http_status", None)
-    result["diagnostics"] = {"stage": stage}
+    result["diagnostics"] = {"stage": stage, **failure_diagnostics}
     if stage == "browser_load" and session is not None:
         result["diagnostics"].update(getattr(session, "diagnostics", {}))
         blocked = getattr(session, "blocked_documents", [])

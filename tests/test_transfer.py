@@ -103,9 +103,11 @@ def test_idle_timeout_removes_partial(server, tmp_path, monkeypatch):
         writer.write(b"late")
     server[0]["/start"] = (200, {"Content-Type": "image/jpeg"}, slow)
     target = tmp_path / "out.jpg"
-    with pytest.raises(LumaBoxError, match="RESOURCE_TIMEOUT"):
+    with pytest.raises(LumaBoxError, match="RESOURCE_TIMEOUT") as failure:
         download(target)
     assert not target.exists()
+    assert failure.value.diagnostics == {"resource_order": 1, "host": "p3.douyinpic.com",
+                                         "http_status": 200, "content_type": "image/jpeg"}
 
 
 def test_total_deadline_stops_trickle_download(server, tmp_path, monkeypatch):
@@ -117,9 +119,11 @@ def test_total_deadline_stops_trickle_download(server, tmp_path, monkeypatch):
             time.sleep(0.05)
     server[0]["/start"] = (200, {"Content-Type": "image/jpeg"}, trickle)
     target = tmp_path / "out.jpg"
-    with pytest.raises(LumaBoxError, match="RESOURCE_TIMEOUT"):
+    with pytest.raises(LumaBoxError, match="RESOURCE_TIMEOUT") as failure:
         download(target)
     assert not target.exists()
+    assert failure.value.diagnostics == {"resource_order": 1, "host": "p3.douyinpic.com",
+                                         "http_status": 200, "content_type": "image/jpeg"}
 
 
 def test_close_delimited_response_resets_socket_to_remaining_deadline(server, tmp_path, monkeypatch):
@@ -175,9 +179,10 @@ def test_cancel_interrupts_trickled_headers(server, tmp_path):
     target = tmp_path / "out.jpg"
     start = time.monotonic()
     try:
-        with pytest.raises(LumaBoxError, match="INTERRUPTED"):
+        with pytest.raises(LumaBoxError, match="INTERRUPTED") as failure:
             transfer.download_resource(MediaResource("https://p3.douyinpic.com/start", 1), target, lambda url: {}, 100, cancel)
         assert time.monotonic() - start < 0.4
         assert not target.exists()
+        assert failure.value.diagnostics == {"resource_order": 1}
     finally:
         timer.cancel()
