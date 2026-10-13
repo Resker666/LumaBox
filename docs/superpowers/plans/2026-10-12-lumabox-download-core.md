@@ -141,8 +141,9 @@
 - [x] 完整合成页面→提取→实际字节下载→FFmpeg验证→发布，视频/图集各一次；加入真实 HTTP失败的端到端测试，assert 非零退出、错误报告、无成功文件。执行全套 `python -m pytest -q`。
 - [x] 记录 Python/Playwright/Chromium/FFmpeg 版本、日期、headed/headless、网络条件可确认事实。首先运行 `python -m lumabox --authorized "https://www.douyin.com/video/7686430330920075249" --output Downloaded/p0-video`。
 - [x] 视频成功才运行 `python -m lumabox --authorized "https://v.douyin.com/p6mTe8JN73M/" --output Downloaded/p0-gallery`；若视频被 DNS/访问限制挡住，仍可诊断图集的相同网络阶段，但不得突破停止规则或宣称真实下载已实现。
-- [ ] 成功必须产生本次新 MP4及全部 12张图片，独立检查视频尺寸/时长/音频、图集顺序/数量/逐张解码和 ZIP 完整性；更新结果报告。失败记录明确错误和用户可复测命令，将真实 P0 标为未通过，不进入网页开发。
-- [ ] 有界面成功后才验证 `--headless`；云服务器留待单独授权和网络验证。执行最终全套测试、`git diff --check` 并做独立代码审查；修复重要发现后复跑相关测试，提交 `docs: report independent LumaBox P0 results`。
+- [x] 成功必须产生本次新 MP4及全部 12张图片，独立检查视频尺寸/时长/音频、图集顺序/数量/逐张解码和 ZIP 完整性；更新结果报告。用户正常网络默认有界面视频运行 `7f6c551d1fcc4f7180a68d6483babe83`、图集运行 `7731a88238664cdaa9c084158ec9f126` 均成功，实际文件再次完整解码和报告核对通过，ZIP CRC、编号/成员顺序及哈希一致。
+- [ ] 有界面成功后验证 `--headless`；云服务器留待单独授权和网络验证。当前已具备有界面真实样本，下一步命令见 `docs/validation/2026-10-13-next-check.md`。
+- [x] 最终代码修补后完整测试 179 项通过，`git diff --check` 通过，独立审查重要发现已修复并复跑相关和全套测试；随后完成默认有界面真实下载产物复核并更新交付记录。Windows 10054 关闭回调仍单独待修，不把它或无头/云验收标为已完成。
 
 ## 计划自审
 
@@ -150,6 +151,6 @@
 
 技术依据：[Playwright 网络与代理](https://playwright.dev/python/docs/network)、[Chromium Fetch 文档请求拦截](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/)、[Playwright CDP 会话](https://playwright.dev/python/docs/api/class-browsercontext#browser-context-new-cdp-session)。特别注意官方网络文档说明浏览器重定向不会重新触发同一 route，地址校验不能只放在 route 回调里。
 
-执行方式：在当前新仓库由本会话直接实施，任务末尾跑完整测试并提交，最终做一次独立代码审查。用户已确认设计及计划并指示“执行”；2026-10-12/13 已实现独立 CLI。真实 P0 因系统 DNS 返回非公网目的地址未通过，保留诊断和复测命令，未进入网站阶段。
+执行方式：在当前新仓库由本会话直接实施，任务末尾跑完整测试并提交，最终做一次独立代码审查。用户已确认设计及计划并指示“执行”；2026-10-12/13 已实现独立 CLI。首次真实实验因系统 DNS 返回非公网目的地址未通过，原始诊断已保留；最新用户正常网络结果确认默认有界面视频及图集通过，未进入网站阶段。
 
-后续（2026-10-13）：用户正常网络已完成 12/12 图集验证。视频补足同一主框架正常详情响应的作品绑定与完整 H.264 地址提取，在临时公网 DNS 条件下通过正式 CLI 新下载并完整解码 1080p H.264/AAC MP4；默认 VPN DNS 条件仍失败，匿名前端加载也有时限内未确认目标的失败。详见 `docs/validation/2026-10-13-video-normal-response.md`，Task 6 的默认网络视频及无头/云验收复选框保持待完成，网站阶段未开始。
+后续（2026-10-13）：视频补足同一主框架正常详情响应的作品绑定与完整 H.264 地址提取后，先有临时公网 DNS 条件下的正式内核成功，最终修补版本又由用户在正常网络通过默认 CLI 下载并完整解码 1080p H.264/AAC MP4；12/12 图集及 ZIP 也已通过真实产物复核。详见 `docs/validation/2026-10-13-video-normal-response.md`。Task 6 的默认有界面样本验证完成，无头/云验收仍待完成，网站阶段未开始。

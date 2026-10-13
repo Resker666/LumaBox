@@ -1,19 +1,25 @@
-# 下一次正常网络检查
+# 下一次正常网络检查：无头模式
 
-在 `E:\develop\douyin-downloader\lumabox` 的 PowerShell 运行。现有环境为可编辑安装，无需重新安装、账号登录或提供 Cookie。
+默认有界面 CLI 已在用户正常网络下载并完整解码 1 个视频、12 张图集图片；实际文件、编号、ZIP 和报告已复核。成功运行分别为 `7f6c551d1fcc4f7180a68d6483babe83`、`7731a88238664cdaa9c084158ec9f126`，详见[最新验收](2026-10-13-video-normal-response.md)。无需重复相同的有界面验收。
 
-图集已经由正常网络成功验证 12 张，下一步只复测新接入的正常详情响应视频路径：
+下一步在相同正常网络、`E:\develop\douyin-downloader\lumabox` 的 PowerShell 测试 `--headless`。这次不会显示 Chromium 窗口，仍使用程序自己的临时匿名会话，不需要登录或提供 Cookie。
+
+先运行视频：
 
 ```powershell
-.\.venv\Scripts\python.exe -m lumabox --authorized "https://www.douyin.com/video/7686430330920075249" --output Downloaded/p0-video
+.\.venv\Scripts\python.exe -m lumabox --headless --authorized "https://www.douyin.com/video/7686430330920075249" --output Downloaded/p0-headless-video
 ```
 
-只有 `status=success`、`expected_count=actual_count=1`、`checks.full_decode=true`，并产生非空 MP4，才算本次默认 CLI 视频成功。此样本已在临时公网 DNS 条件下通过正式内核取得 1920×1080、124.6 秒、H.264/AAC 的完整文件；不能外推到所有作品或网络。
+视频成功后运行图集：
 
-若失败，提供完整最终 JSON。`detail_response_count` 和 `detail_metadata_parsed` 可判断正常详情响应是否出现并解析；传输阶段的 `reason`、`host`、`http_status` 和 `content_type` 可区分媒体连接、访问拒绝和格式问题。
+```powershell
+.\.venv\Scripts\python.exe -m lumabox --headless --authorized "https://v.douyin.com/p6mTe8JN73M/" --output Downloaded/p0-headless-gallery
+```
 
-此次命令使用已修补的提取路径，不再只等待 blob 变为 HTTPS。程序仅观察页面本来就发出的详情请求，并核对目标作品，下载完整 MP4；不从未绑定的范围请求、推荐或特效素材中猜测目标，也没有增加分离音视频拼接功能。
+成功条件是 `status=success`、`headless=true`、`checks.full_decode=true`，并产生非空文件；视频 `expected_count=actual_count=1`，图集 `expected_count=actual_count=12` 且包含 ZIP。不要把有界面报告当成无头验收，也不把本地成功外推到 Linux 云服务器。
 
-默认 CLI 保留系统 DNS 与公网目的地址校验。如果使用返回非公网映射的 VPN DNS，仍会在页面前返回 `UNSAFE_TARGET`。真实下载及条件区别见 [视频正常响应验证](2026-10-13-video-normal-response.md)；本轮未修改系统网络或发布诊断解析器，网站阶段尚未开始。
+若失败，保留完整最终 JSON；遇到明确访问拒绝、强制登录或挑战时停止该路径，不连续重试。`detail_response_count` 和 `detail_metadata_parsed` 可帮助判断目标视频详情响应是否出现。
 
-不要复制账号 Cookie、媒体签名地址或导出包含登录资料的 HAR。若仍出现 Windows 连接关闭回调 10054，保留该输出和最终 JSON；此异常尚未单独修复。
+默认 CLI 保留系统 DNS 与公网目的地址校验。如果 VPN DNS 返回非公网映射，仍会在页面前返回 `UNSAFE_TARGET`。不启用此前忽略目录中的诊断解析器，不修改系统网络。
+
+Windows 10054 连接关闭回调仍未修复，最新有界面成功运行也出现过；保留该输出和最终 JSON。不要复制账号 Cookie、媒体签名地址或导出含登录资料的 HAR。网站阶段尚未开始。

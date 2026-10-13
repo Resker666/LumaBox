@@ -66,6 +66,6 @@ python3 -m venv .venv
 
 默认测试不访问抖音：运行真实 Chromium、测试 HTTP 服务和 FFmpeg，使用合成页面及新生成媒体。测试环境需允许浏览器进程和回环网络连接。
 
-此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已通过正式内核下载并完整解码新的 1080p H.264/AAC 视频，但该次运行单独使用临时公网 DNS 解析，默认 CLI 在当前 VPN 地址映射下仍失败。用户正常网络的默认 CLI 视频、有界面/无头及 Linux 云网络需要分别确认；网站阶段尚未开始。
+此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已确认用户正常网络的默认有界面 CLI 成功取得 1080p、124.6 秒的 H.264/AAC 视频，以及完整 12 张图集。实际文件已再次完整解码，图集 ZIP 内容与报告一致。该成功没有启用临时公网 DNS 诊断解析器；返回非公网映射的 VPN DNS 仍会被拒绝。Windows 10054 连接关闭回调仍有输出，尚未修复。无头、其他作品及 Linux 云网络需分别实测；网站阶段尚未开始。
 
 本阶段自行实现内核，没有复制 Resker666/douyin-downloader 的业务代码。来源范围与设计见 `docs/superpowers/specs/`。
