@@ -12,6 +12,8 @@ mode, root, fixture = sys.argv[1:]
 root=Path(root)
 if mode == 'timeout':
     time.sleep(60)
+if mode == 'delayed':
+    time.sleep(3)
 if mode == 'failed':
     print(json.dumps({'status':'failed','error':'AUTH_REQUIRED','diagnostics':{'reason':'secret'}}))
     sys.exit(1)

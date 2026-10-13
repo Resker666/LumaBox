@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>LumaBox · 光匣</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="LumaBox 光匣首页"><span class="brand-mark" aria-hidden="true"><i></i></span><span>LumaBox <small>光匣</small></span></a>
+    <div class="header-actions"><span class="local-label"><i></i> 本地工作台</span><button id="logout" class="quiet-button" hidden>退出登录</button></div>
+  </header>
+
+  <main>
+    <section id="login-view" class="login-layout">
+      <div class="intro">
+        <div class="eyebrow">YOUR MOMENTS, WELL KEPT</div>
+        <h1>光影有处，<br><span>收藏有序。</span></h1>
+        <p>把喜欢的视频与图片，收进自己的光匣。<br>一条链接，一份完整的收藏。</p>
+        <div class="light-art" aria-hidden="true"><div class="art-ring"></div><div class="art-box"><span class="art-play">▶</span></div><div class="art-photo"><span></span></div><i class="spark spark-one">✧</i><i class="spark spark-two">✧</i></div>
+        <div class="intro-foot"><span>视频 MP4</span><i>·</i><span>整组图片</span><i>·</i><span>私享收藏</span></div>
+      </div>
+      <div class="login-card">
+        <div class="card-symbol" aria-hidden="true">↗</div>
+        <h2>欢迎回到光匣</h2><p class="muted">请输入启动时设置的访问密码。</p>
+        <form id="login-form">
+          <label for="password">访问密码</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="4096" placeholder="输入你的访问密码">
+          <p id="login-error" class="form-error" role="alert" hidden></p>
+          <button class="primary-button" id="login-button" type="submit">打开光匣 <span aria-hidden="true">→</span></button>
+        </form>
+        <div class="login-note"><span aria-hidden="true">◈</span> 你的收藏，只在这台电脑上。</div>
+      </div>
+    </section>
+
+    <section id="workspace-view" hidden>
+      <div class="workspace-heading"><div class="eyebrow">A LITTLE BOX OF GOOD THINGS</div><h1>收进你的光匣<span>。</span></h1><p class="muted">留住一个瞬间，从粘贴链接开始。</p></div>
+      <div class="workspace-grid">
+        <section class="composer panel" aria-labelledby="composer-heading">
+          <div class="section-kicker"><span class="step-tag">01</span><h2 id="composer-heading">添加一份收藏</h2></div>
+          <form id="job-form">
+            <label for="work-input">作品链接或分享文案</label>
+            <textarea id="work-input" name="input" rows="4" required maxlength="4096" placeholder="粘贴抖音视频、图集链接，或包含链接的分享文案…"></textarea>
+            <div class="input-hint">支持视频、图文作品和短链接</div>
+            <div class="submit-row"><label class="authorization"><input id="authorized" type="checkbox" required><span>我有权下载此作品</span></label><button id="submit-button" class="primary-button" type="submit">开始下载 <span aria-hidden="true">↘</span></button></div>
+            <p id="submit-error" class="form-error" role="alert" hidden></p>
+            <p id="submit-success" class="form-success" role="status" hidden>已加入光匣，完成后即可领取。</p>
+          </form>
+        </section>
+        <aside class="tips-panel">
+          <div class="tips-icon" aria-hidden="true">✧</div><h2>完整，才算收藏。</h2>
+          <p>视频保存为 MP4，图集按作品顺序打包。全部文件检查通过后，即可下载。</p>
+          <div class="tip-divider"></div>
+          <div class="tip-detail"><span>有序下载</span><small>一次处理一个作品</small></div>
+          <div class="tip-detail"><span>及时领取</span><small>文件保留 24 小时</small></div>
+        </aside>
+      </div>
+
+      <section class="collection" aria-labelledby="collection-heading">
+        <div class="collection-heading"><div class="section-kicker"><span class="step-tag">02</span><h2 id="collection-heading">最近的收藏</h2></div><span id="task-count" class="muted small">0 份收藏</span></div>
+        <p id="connection-error" class="form-error" role="status" hidden></p>
+        <div id="empty-state" class="empty-state"><span aria-hidden="true">▤</span><h3>光匣里还很安静</h3><p>添加第一条链接，把喜欢的瞬间留下来。</p></div>
+        <div id="job-list" class="job-list" aria-label="最近下载任务"></div>
+        <p class="collection-foot">显示最近 30 个任务 · 等待队列最多 10 个 · 文件保留 24 小时</p>
+      </section>
+    </section>
+  </main>
+  <footer class="site-footer"><span>LumaBox · 光匣</span><span>给每个值得留住的瞬间，一个位置。</span></footer>
+</body>
+</html>

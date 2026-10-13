@@ -1,8 +1,8 @@
 # LumaBox · 光匣
 
-通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。独立 Python 命令行内核；当前没有网站、服务端 API 或部署配置。
+通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前版本为 **0.1.0**（命令行内核）。[版本变更](CHANGELOG.md)和[交付记录](docs/releases/0.1.0.md)列出本版范围与验证条件。
+当前版本为 **0.2.0**（本地网页）。[版本变更](CHANGELOG.md)、[网页验证记录](docs/validation/2026-10-13-local-web.md)和[0.1 命令行交付记录](docs/releases/0.1.0.md)列出范围与验证条件。
 
 ## 当前验证状态
 
@@ -23,7 +23,7 @@ Windows PowerShell（在本仓库目录）：
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[web,dev]"
 .\.venv\Scripts\python.exe -m playwright install chromium
 .\.venv\Scripts\python.exe -m lumabox --help
 ```
@@ -32,11 +32,38 @@ Linux 安装命令（云服务器尚未实测）：
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -e '.[web,dev]'
 .venv/bin/python -m playwright install --with-deps chromium
 ```
 
-## 使用
+## 本地网页
+
+在仓库目录运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m lumabox.web
+```
+
+程序会隐藏输入，要求设置至少 12 字符的访问密码。然后打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，使用此密码登录，粘贴作品链接或分享文案、确认授权并提交。任务完成后领取视频 MP4、编号图片或整组 ZIP。网页登录密码用于访问本地工作台；抖音下载仍使用临时匿名浏览器，没有新增抖音账号登录。
+
+Windows 默认显示下载用的 Chromium 窗口，与已实测成功的 CLI 一致。按 Ctrl+C 停止服务；当前运行任务会中断，尚未开始的任务在下次启动时恢复。网页会自动更新状态，无需一直点击刷新。
+
+可选启动方式：
+
+```powershell
+.\.venv\Scripts\python.exe -m lumabox.web --port 8766 --data WebData
+.\.venv\Scripts\python.exe -m lumabox.web --headless
+```
+
+安装网页依赖后也可运行 `.\.venv\Scripts\lumabox-web.exe`。自动化启动可以通过 `LUMABOX_WEB_PASSWORD` 环境变量提供密码；启动后从进程环境移除，子进程不继承此密码。没有默认密码，密码不会写入任务数据库。服务重启需再次提供密码，之前的登录会话失效。
+
+网页固定监听本机 `127.0.0.1`；本版没有公网部署配置。默认 `WebData/` 保存 SQLite 任务历史和私有产物，已从 Git 排除。不要把此目录放入其他网站的静态文件目录。修改数据目录会切换到另一份独立任务历史。
+
+限制：同时运行 1 个任务、最多 10 个等待任务；单任务 15 分钟；文件保留 24 小时，每分钟检查到期；输出容量 2 GiB，每次开始预留 512 MiB，并检查磁盘空闲空间。空间不足时明确失败，不自动删除未到期成功文件。同一数据目录只允许一个服务实例。图集 ZIP 内报告只包含作品及文件校验信息，不包含本机路径。任务和文件下载均需登录，会话最长 8 小时。
+
+已完成本地生成媒体的真实 HTTP/Chromium 网页测试。真实抖音下载仍以此前两个 CLI 成功样本为证据；网页入口在可用正常网络下的抖音下载、无头和 Linux 成功需分别验收。先用上述两个样本从网页提交，确认播放器/图集能正常加载和最终文件完整，再推进 Linux。
+
+## 命令行使用
 
 ```powershell
 .\.venv\Scripts\python.exe -m lumabox --authorized "https://www.douyin.com/video/7686430330920075249"
@@ -79,6 +106,6 @@ python3 -m venv .venv
 
 默认测试不访问抖音：运行真实 Chromium、测试 HTTP 服务和 FFmpeg，使用合成页面及新生成媒体。测试环境需允许浏览器进程和回环网络连接。
 
-此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已确认用户正常网络的默认有界面 CLI 成功取得 1080p、124.6 秒的 H.264/AAC 视频，以及完整 12 张图集。实际文件已再次完整解码，图集 ZIP 内容与报告一致。该成功没有启用临时公网 DNS 诊断解析器；返回非公网映射的 VPN DNS 仍会被拒绝。Windows 10054 连接关闭回调仍有输出，尚未修复。无头、其他作品及 Linux 云网络需分别实测；网站阶段尚未开始。
+此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已确认用户正常网络的默认有界面 CLI 成功取得 1080p、124.6 秒的 H.264/AAC 视频，以及完整 12 张图集。实际文件已再次完整解码，图集 ZIP 内容与报告一致。该成功没有启用临时公网 DNS 诊断解析器；返回非公网映射的 VPN DNS 仍会被拒绝。Windows 10054 连接关闭回调仍有输出，尚未修复。无头、其他作品及 Linux 云网络需分别实测；网页验证范围见[网页记录](docs/validation/2026-10-13-local-web.md)。
 
 本阶段自行实现内核，没有复制 Resker666/douyin-downloader 的业务代码。来源范围与设计见 `docs/superpowers/specs/`。
