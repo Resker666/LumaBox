@@ -209,22 +209,34 @@ class JobStore:
 
     def migrate_outputs(self):
         old, new = self.previous_output, self.config.output_dir
-        if old != new and old.exists():
+        if old != new:
             with self.connection() as db:
                 rows = [dict(row) for row in db.execute("SELECT files.* FROM files JOIN jobs ON files.job_id=jobs.id WHERE jobs.status='success'")]
             grouped = {}
             for row in rows:
                 grouped.setdefault(row["job_id"], []).append(row)
             for job_id, files in grouped.items():
-                if not ID.fullmatch(job_id):
+                if not ID.fullmatch(job_id) or new.is_relative_to(old / job_id):
                     raise WebError("MIGRATION_FAILED")
+                for file in files:
+                    parts = Path(file["relative_path"]).parts
+                    if len(parts) < 2 or parts[0] != job_id:
+                        raise WebError("MIGRATION_FAILED")
+
+            def verify(files, root):
+                try:
+                    for file in files:
+                        source = self.safe_path(file["relative_path"], root=root)
+                        with source.open("rb") as stream:
+                            if source.stat().st_size != file["bytes"] or hashlib.file_digest(stream, "sha256").hexdigest() != file["sha256"]:
+                                raise WebError("MIGRATION_FAILED")
+                except (OSError, WebError):
+                    raise WebError("MIGRATION_FAILED") from None
+
+            for job_id, files in grouped.items():
                 destination = new / job_id
                 root = new if destination.exists() else old
-                for file in files:
-                    source = self.safe_path(file["relative_path"], root=root)
-                    with source.open("rb") as stream:
-                        if source.stat().st_size != file["bytes"] or hashlib.file_digest(stream, "sha256").hexdigest() != file["sha256"]:
-                            raise WebError("MIGRATION_FAILED")
+                verify(files, root)
                 if destination.exists():
                     continue
                 source = self.safe_path(job_id, root=old)
@@ -233,10 +245,13 @@ class JobStore:
                         raise WebError("MIGRATION_FAILED")
                 temporary = new / f".migration-{uuid.uuid4().hex}"
                 try:
-                    shutil.copytree(source, temporary)
+                    temporary.mkdir()
+                    staged = temporary / job_id
+                    shutil.copytree(source, staged)
                     if temporary.resolve().parent != new or destination.parent.resolve() != new:
                         raise WebError("MIGRATION_FAILED")
-                    temporary.rename(destination)
+                    verify(files, temporary)
+                    staged.rename(destination)
                 finally:
                     if temporary.exists() and temporary.resolve().parent == new and not is_link(temporary):
                         shutil.rmtree(temporary)

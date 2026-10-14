@@ -72,8 +72,11 @@ function failureText(job) {
   if (job.error !== "SIZE_LIMIT") return failures[job.error] || failures.DOWNLOAD_FAILED;
   const detail = job.error_detail || {};
   const limit = detail.limit_bytes || (job.video_limit_mib || 100) * 1024 ** 2;
-  if (detail.actual_bytes) return `文件大小为 ${size(detail.actual_bytes)}，超过此任务的 ${size(limit)} 上限。`;
-  if (detail.at_least_bytes) return `已读取文件超过 ${size(detail.at_least_bytes)}，此任务上限为 ${size(limit)}。`;
+  const amount = detail.actual_bytes || detail.at_least_bytes;
+  const exact = amount && size(amount) === size(limit);
+  const display = (bytes) => `${size(bytes)}${exact ? `（${bytes.toLocaleString("zh-CN")} 字节）` : ""}`;
+  if (detail.actual_bytes) return `文件大小为 ${display(detail.actual_bytes)}，超过此任务的 ${display(limit)} 上限。`;
+  if (detail.at_least_bytes) return `已读取文件超过 ${display(detail.at_least_bytes)}，此任务上限为 ${display(limit)}。`;
   if (job.kind === "gallery") return "图集超出限制：单张图片 20 MiB、整组 200 MiB，最多 50 张。";
   return `作品超出此任务的限制（视频上限 ${size(limit)}；图集 20 MiB / 张、200 MiB / 50 张）。可调整上限后重试。`;
 }
@@ -169,6 +172,7 @@ async function poll() {
   try {
     jobs = (await api("/api/jobs")).jobs;
     renderJobs();
+    if ($("connection-error").textContent === "连接暂时中断，正在尝试重新连接…") notice("connection-error", "");
   } catch { notice("connection-error", "连接暂时中断，正在尝试重新连接…"); }
   finally { polling = false; timer = setTimeout(poll, 2000); }
 }

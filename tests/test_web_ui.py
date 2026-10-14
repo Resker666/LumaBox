@@ -151,3 +151,34 @@ def test_size_error_shows_actual_size_and_task_limit(server, browser):
         expect(page.get_by_role("button", name="一键重试", exact=True)).to_be_visible()
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("detail_key", ["actual_bytes", "at_least_bytes"])
+def test_size_error_one_byte_above_limit_shows_distinct_exact_sizes(server, browser, detail_key):
+    url, worker, _ = server
+    job = worker.store.create(URL)
+    worker.store.fail(job["id"], "SIZE_LIMIT", {"diagnostics": {
+        "limit_bytes": 1073741824, detail_key: 1073741825}})
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.goto(url)
+        expect(page.get_by_text("1,073,741,825 字节", exact=False)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("1,073,741,824 字节", exact=False)).to_be_visible()
+    finally:
+        context.close()
+
+
+def test_polling_connection_notice_clears_after_recovery(server, browser):
+    url, _, _ = server
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.route("**/api/jobs", lambda route: route.abort())
+        page.goto(url)
+        warning = page.get_by_text("连接暂时中断，正在尝试重新连接…", exact=True)
+        expect(warning).to_be_visible(timeout=5000)
+        page.unroute("**/api/jobs")
+        expect(warning).to_be_hidden(timeout=5000)
+    finally:
+        context.close()

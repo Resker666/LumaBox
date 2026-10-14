@@ -385,6 +385,97 @@ def test_legacy_success_copies_into_output_without_deleting_original(tmp_path, m
     assert migrated.read_bytes() == media_fixtures[0].read_bytes()
 
 
+def test_unavailable_previous_output_preserves_mapping_and_resumes_after_reconnect(tmp_path, media_fixtures):
+    legacy_config = WebConfig(tmp_path / "data", output=tmp_path / "data" / "outputs")
+    legacy = JobStore(legacy_config)
+    legacy.migrate_outputs()
+    job = legacy.create(URL)
+    fixture_worker(legacy_config, legacy, tmp_path, media_fixtures[0]).run_once()
+    file_id = legacy.get(job["id"])["files"][0]["id"]
+    offline = tmp_path / "offline"
+    legacy_config.output_dir.rename(offline)
+    config = WebConfig(tmp_path / "data")
+    reopened = JobStore(config)
+    with pytest.raises(WebError, match="MIGRATION_FAILED"):
+        reopened.migrate_outputs()
+    with reopened.connection() as db:
+        assert db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()[0] == str(legacy_config.output_dir)
+    assert reopened.get(job["id"])["status"] == "success"
+    assert list(offline.rglob("*.mp4"))[0].read_bytes() == media_fixtures[0].read_bytes()
+    offline.rename(legacy_config.output_dir)
+    resumed = JobStore(config)
+    resumed.migrate_outputs()
+    assert resumed.file_path(resumed.file(file_id)).read_bytes() == media_fixtures[0].read_bytes()
+
+
+def test_output_nested_in_previous_job_is_rejected_before_copy(tmp_path, media_fixtures, monkeypatch):
+    legacy_config = WebConfig(tmp_path / "data", output=tmp_path / "data" / "outputs")
+    legacy = JobStore(legacy_config)
+    legacy.migrate_outputs()
+    job = legacy.create(URL)
+    fixture_worker(legacy_config, legacy, tmp_path, media_fixtures[0]).run_once()
+    original = legacy.file_path(legacy.file(legacy.get(job["id"])["files"][0]["id"]))
+    config = WebConfig(tmp_path / "data", output=legacy_config.output_dir / job["id"] / "nested")
+    reopened = JobStore(config)
+    def never_copy(*args, **kwargs):
+        raise AssertionError("Recursive source/destination copying must not begin")
+    monkeypatch.setattr("lumabox.web.store.shutil.copytree", never_copy)
+    with pytest.raises(WebError, match="MIGRATION_FAILED"):
+        reopened.migrate_outputs()
+    assert original.read_bytes() == media_fixtures[0].read_bytes()
+    with reopened.connection() as db:
+        assert db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()[0] == str(legacy_config.output_dir)
+
+
+def test_migration_rejects_same_length_corruption_in_staging(tmp_path, media_fixtures, monkeypatch):
+    import shutil
+    legacy_config = WebConfig(tmp_path / "data", output=tmp_path / "data" / "outputs")
+    legacy = JobStore(legacy_config)
+    legacy.migrate_outputs()
+    job = legacy.create(URL)
+    fixture_worker(legacy_config, legacy, tmp_path, media_fixtures[0]).run_once()
+    original = legacy.file_path(legacy.file(legacy.get(job["id"])["files"][0]["id"]))
+    copytree = shutil.copytree
+    def corrupted_copy(source, destination, *args, **kwargs):
+        result = copytree(source, destination, *args, **kwargs)
+        if Path(source).name == job["id"]:
+            copied = list(Path(destination).rglob("*.mp4"))[0]
+            data = copied.read_bytes()
+            copied.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+        return result
+    monkeypatch.setattr("lumabox.web.store.shutil.copytree", corrupted_copy)
+    config = WebConfig(tmp_path / "data")
+    reopened = JobStore(config)
+    with pytest.raises(WebError, match="MIGRATION_FAILED"):
+        reopened.migrate_outputs()
+    assert original.read_bytes() == media_fixtures[0].read_bytes()
+    assert not (config.output_dir / job["id"]).exists()
+    assert not list(config.output_dir.glob(".migration-*"))
+    with reopened.connection() as db:
+        assert db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()[0] == str(legacy_config.output_dir)
+
+
+def test_migration_rejects_file_record_outside_its_job(tmp_path, media_fixtures):
+    legacy_config = WebConfig(tmp_path / "data", output=tmp_path / "data" / "outputs")
+    legacy = JobStore(legacy_config)
+    legacy.migrate_outputs()
+    job = legacy.create(URL)
+    fixture_worker(legacy_config, legacy, tmp_path, media_fixtures[0]).run_once()
+    misplaced = legacy_config.output_dir / "other" / "video.mp4"
+    misplaced.parent.mkdir()
+    misplaced.write_bytes(media_fixtures[0].read_bytes())
+    with legacy.connection() as db:
+        db.execute("UPDATE files SET relative_path=? WHERE job_id=?", ("other/video.mp4", job["id"]))
+    config = WebConfig(tmp_path / "data")
+    reopened = JobStore(config)
+    with pytest.raises(WebError, match="MIGRATION_FAILED"):
+        reopened.migrate_outputs()
+    assert misplaced.read_bytes() == media_fixtures[0].read_bytes()
+    assert not (config.output_dir / job["id"]).exists()
+    with reopened.connection() as db:
+        assert db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()[0] == str(legacy_config.output_dir)
+
+
 def test_failure_keeps_only_fixed_size_details_and_work_identity(config):
     store = JobStore(config)
     job = store.create("https://v.douyin.com/test/", video_limit_mib=1)
