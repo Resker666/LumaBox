@@ -12,7 +12,7 @@ from .net import PinnedHTTPSConnection, resolve_public, bounded_call
 from .urls import validate_media_url
 
 IDLE_TIMEOUT = 15.0
-TOTAL_TIMEOUT = 180.0
+TOTAL_TIMEOUT = 1800.0
 DIAGNOSTIC_TYPES = frozenset({"image/jpeg", "image/webp", "image/png", "image/avif", "image/gif", "image/heic",
                              "video/mp4", "application/octet-stream", "binary/octet-stream", "text/html",
                              "application/json", "text/plain"})
@@ -115,7 +115,8 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
                     raise LumaBoxError("DOWNLOAD_FAILED", "Invalid media length")
                 expected_length = int(length) if length is not None else None
                 if expected_length is not None and expected_length > max_bytes:
-                    raise LumaBoxError("SIZE_LIMIT", "Media exceeds the file size limit")
+                    raise LumaBoxError("SIZE_LIMIT", "Media exceeds the file size limit",
+                                       diagnostics={"limit_bytes": max_bytes, "actual_bytes": expected_length})
                 total = 0
                 with path.open("xb") as output:
                     created = True
@@ -132,7 +133,8 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
                             break
                         total += len(block)
                         if total > max_bytes:
-                            raise LumaBoxError("SIZE_LIMIT", "Media exceeds the file size limit")
+                            raise LumaBoxError("SIZE_LIMIT", "Media exceeds the file size limit",
+                                               diagnostics={"limit_bytes": max_bytes, "at_least_bytes": total})
                         output.write(block)
                 if total == 0 or (expected_length is not None and total != expected_length):
                     raise LumaBoxError("DOWNLOAD_FAILED", "The media response was empty or incomplete")

@@ -1,0 +1,207 @@
+import secrets
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from starlette.background import BackgroundTask
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.staticfiles import StaticFiles
+
+from .config import WebConfig, WebError
+from .folders import open_folder
+from .store import JobStore
+from .worker import JobWorker
+
+MESSAGES = {
+    "FORBIDDEN": "请求校验失败，请刷新页面重试。",
+    "INVALID_REQUEST": "请求格式不正确。", "BODY_TOO_LARGE": "提交内容过长，请缩短后重试。",
+    "JSON_REQUIRED": "请提交 JSON 格式的请求。", "INVALID_INPUT": "请粘贴一条抖音视频或图集链接。",
+    "QUEUE_FULL": "等待队列已满，请稍后再试。", "ALREADY_QUEUED": "此任务已有重试正在等待或运行。",
+    "NOT_RETRYABLE": "此任务当前无需重试。", "FOLDER_OPEN_UNAVAILABLE": "暂时无法打开文件夹，可按保存位置查找或另存文件。",
+    "NOT_FOUND": "任务或文件不存在，文件可能已过期。", "SERVER_ERROR": "暂时无法完成请求，请稍后重试。",
+}
+
+
+def error_response(error: WebError):
+    return JSONResponse({"error": error.code, "message": MESSAGES.get(error.code, MESSAGES["SERVER_ERROR"])}, status_code=error.status)
+
+
+class LocalBoundary:
+    """Bound request bodies before parsing; enforce local Host and same-origin writes."""
+    def __init__(self, app, port):
+        self.app = app
+        suffix = "" if port == 80 else f":{port}"
+        self.hosts = {"127.0.0.1" + suffix, "localhost" + suffix}
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def secure_send(message):
+            if message["type"] == "http.response.start":
+                message["headers"] += [
+                    (b"cache-control", b"no-store"), (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"no-referrer"), (b"x-frame-options", b"DENY"),
+                    (b"content-security-policy", b"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+                ]
+            await send(message)
+
+        try:
+            headers = dict(scope["headers"])
+            hosts = [value for key, value in scope["headers"] if key == b"host"]
+            host = headers.get(b"host", b"").decode("latin-1")
+            if len(hosts) != 1 or host not in self.hosts:
+                raise WebError("FORBIDDEN", 403)
+            if scope["path"].startswith("/api/") and headers.get(b"sec-fetch-site") == b"cross-site":
+                raise WebError("FORBIDDEN", 403)
+            if scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+                if headers.get(b"origin", b"").decode("latin-1") != "http://" + host:
+                    raise WebError("FORBIDDEN", 403)
+                if headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower() != b"application/json":
+                    raise WebError("JSON_REQUIRED", 415)
+                try:
+                    if int(headers.get(b"content-length", b"0")) > 8192:
+                        raise WebError("BODY_TOO_LARGE", 413)
+                except ValueError:
+                    raise WebError("INVALID_REQUEST") from None
+                body = bytearray()
+                while True:
+                    message = await receive()
+                    if message["type"] != "http.request":
+                        raise WebError("INVALID_REQUEST")
+                    body.extend(message.get("body", b""))
+                    if len(body) > 8192:
+                        raise WebError("BODY_TOO_LARGE", 413)
+                    if not message.get("more_body", False):
+                        break
+                original_receive = receive
+                delivered = False
+
+                async def bounded_receive():
+                    nonlocal delivered
+                    if not delivered:
+                        delivered = True
+                        return {"type": "http.request", "body": bytes(body), "more_body": False}
+                    return await original_receive()
+
+                receive = bounded_receive
+            await self.app(scope, receive, secure_send)
+        except WebError as exc:
+            await error_response(exc)(scope, receive, secure_send)
+
+
+async def object_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError
+        return body
+    except (ValueError, UnicodeError):
+        raise WebError("INVALID_REQUEST") from None
+
+
+def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
+    csrf = secrets.token_urlsafe(32)
+    store = worker.store if worker is not None else JobStore(config)
+    worker = worker if worker is not None else JobWorker(config, store)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        worker.start()
+        try:
+            yield
+        finally:
+            worker.stop()
+
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.store = store
+    app.add_middleware(LocalBoundary, port=config.port)
+
+    @app.exception_handler(WebError)
+    async def web_error(request, exc):
+        return error_response(exc)
+
+    @app.exception_handler(Exception)
+    async def server_error(request, exc):
+        return error_response(WebError("SERVER_ERROR", 500))
+
+    def write_guard(request):
+        token = request.headers.get("x-csrf-token", "")
+        if not secrets.compare_digest(token.encode("utf-8"), csrf.encode("ascii")):
+            raise WebError("FORBIDDEN", 403)
+
+    @app.get("/api/session")
+    def get_session():
+        return {"csrf": csrf, "video_limit_mib": config.video_limit_mib, "max_video_limit_mib": 8192,
+                "output_directory": str(config.output_dir), "pending_limit": 10, "persistent": True,
+                "image_limit_mib": 20, "gallery_limit_mib": 200, "gallery_count_limit": 50}
+
+    @app.post("/api/jobs", status_code=202)
+    async def submit_job(request: Request):
+        write_guard(request)
+        if worker.stopping.is_set():
+            raise WebError("SERVER_ERROR", 503)
+        body = await object_body(request)
+        if "input" not in body or set(body) - {"input", "video_limit_mib"}:
+            raise WebError("INVALID_REQUEST")
+        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib))
+
+    @app.post("/api/jobs/{job_id}/retry", status_code=202)
+    async def retry_job(job_id: str, request: Request):
+        write_guard(request)
+        if worker.stopping.is_set():
+            raise WebError("SERVER_ERROR", 503)
+        body = await object_body(request)
+        if set(body) - {"video_limit_mib"}:
+            raise WebError("INVALID_REQUEST")
+        return store.retry(job_id, body.get("video_limit_mib", config.video_limit_mib))
+
+    @app.post("/api/jobs/{job_id}/open-folder")
+    async def show_folder(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        open_folder(store.folder(job_id))
+        return {"status": "ok"}
+
+    @app.get("/api/jobs")
+    def list_jobs(request: Request):
+        return {"jobs": store.list()}
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: str, request: Request):
+        return store.get(job_id)
+
+    @app.get("/api/files/{file_id}")
+    def download(file_id: str, request: Request):
+        lease = store.open_file(file_id)
+        file, stream = lease.__enter__()
+        released = False
+
+        def release():
+            nonlocal released
+            if not released:
+                released = True
+                lease.__exit__(None, None, None)
+
+        def chunks():
+            try:
+                while chunk := stream.read(64 * 1024):
+                    yield chunk
+            finally:
+                release()
+
+        return StreamingResponse(chunks(), media_type=file["mime"], headers={
+            "Content-Length": str(file["bytes"]), "Content-Disposition": f'attachment; filename="{file["name"]}"'},
+            background=BackgroundTask(release))
+
+    static = Path(__file__).parent / "static"
+
+    @app.get("/")
+    def index():
+        return FileResponse(static / "index.html", media_type="text/html")
+
+    if static.is_dir():
+        app.mount("/static", StaticFiles(directory=static), name="static")
+    return app

@@ -42,3 +42,17 @@ def test_truncated_webp_does_not_pass_signature_alone(tmp_path, webp_fixture):
     image.write_bytes(webp_fixture.read_bytes()[:20])
     with pytest.raises(LumaBoxError, match="VERIFY_FAILED"):
         verify_file(image, "gallery")
+
+
+def test_video_decode_can_use_more_than_three_minutes(media_fixtures, monkeypatch):
+    import subprocess
+    import lumabox.verify as verification
+    original_run = subprocess.run
+    def slow_decoder(command, **kwargs):
+        if command[0] == "ffmpeg" and kwargs["timeout"] < 240:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return original_run(command, **kwargs)
+    monkeypatch.setattr(verification.subprocess, "run", slow_decoder)
+    result = verify_file(media_fixtures[0], "video")
+    assert (result.width, result.height) == (64, 48)
+    assert result.bytes == media_fixtures[0].stat().st_size
