@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 Downloaded/
 WebData/
+Output/
 .superpowers/
 dist/
 build/

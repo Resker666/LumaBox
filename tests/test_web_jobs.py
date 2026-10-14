@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 import threading
 import time
 import zipfile
@@ -16,7 +17,7 @@ from web_helpers import URL, WORK_ID, fixture_worker
 
 @pytest.fixture
 def config(tmp_path):
-    return WebConfig(tmp_path / "data")
+    return WebConfig(tmp_path / "data", capacity_bytes=2 * 1024**3, retention_seconds=86400)
 
 
 def test_queue_limit_fifo_and_running_is_not_pending(config):
@@ -71,7 +72,7 @@ def test_real_child_success_only_publishes_verified_file(config, tmp_path, media
     assert (result["status"], result["actual_count"]) == ("success", 1)
     file = store.file(result["files"][0]["id"])
     assert store.file_path(file).read_bytes() == media_fixtures[0].read_bytes()
-    assert "output_directory" not in json.dumps(result)
+    assert store.file_path(file).parent == Path(result["output_directory"])
     assert str(config.data_dir) not in json.dumps(result)
 
 
@@ -337,7 +338,7 @@ def test_max_gallery_stays_below_capacity_at_reserve_boundary(config, tmp_path, 
     occupied = config.output_dir / "occupied.bin"
     with occupied.open("wb") as file:
         file.truncate(1536 * 1024**2)  # Independent boundary: 2 GiB minus 512 MiB.
-    job = store.create("https://v.douyin.com/test/")
+    job = store.create("https://v.douyin.com/test/", video_limit_mib=100)
     peaks = []
     original_write = zipfile.ZipFile.write
     def measure(archive, filename, *args, **kwargs):
@@ -354,4 +355,55 @@ def test_max_gallery_stays_below_capacity_at_reserve_boundary(config, tmp_path, 
         assert max(peaks) < 2 * 1024**3
     finally:
         occupied.unlink()
+        store.cleanup(job["id"])
+
+
+def test_default_local_files_do_not_expire(tmp_path, media_fixtures):
+    config = WebConfig(tmp_path / "data")
+    store = JobStore(config)
+    job = store.create(URL)
+    fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
+    store.expire(now=time.time() + 365 * 86400)
+    assert store.get(job["id"])["status"] == "success"
+    assert store.file_path(store.file(store.get(job["id"])["files"][0]["id"])).read_bytes() == media_fixtures[0].read_bytes()
+
+
+def test_legacy_success_copies_into_output_without_deleting_original(tmp_path, media_fixtures):
+    legacy_config = WebConfig(tmp_path / "data", output=tmp_path / "data" / "outputs")
+    legacy = JobStore(legacy_config)
+    job = legacy.create(URL)
+    fixture_worker(legacy_config, legacy, tmp_path, media_fixtures[0]).run_once()
+    file_id = legacy.get(job["id"])["files"][0]["id"]
+    original = legacy.file_path(legacy.file(file_id))
+    config = WebConfig(tmp_path / "data")
+    reopened = JobStore(config)
+    reopened.migrate_outputs()
+    migrated = reopened.file_path(reopened.file(file_id))
+    assert migrated.is_relative_to(tmp_path / "Output")
+    assert migrated.read_bytes() == original.read_bytes() == media_fixtures[0].read_bytes()
+    reopened.migrate_outputs()
+    assert migrated.read_bytes() == media_fixtures[0].read_bytes()
+
+
+def test_failure_keeps_only_fixed_size_details_and_work_identity(config):
+    store = JobStore(config)
+    job = store.create("https://v.douyin.com/test/", video_limit_mib=1)
+    store.fail(job["id"], "SIZE_LIMIT", {"work_id": WORK_ID, "kind": "video",
+        "diagnostics": {"limit_bytes": 1048576, "actual_bytes": 2097152, "reason": "Cookie=secret"}})
+    result = store.get(job["id"])
+    assert result["work_id"] == WORK_ID and result["kind"] == "video"
+    assert result["error_detail"] == {"limit_bytes": 1048576, "actual_bytes": 2097152}
+    assert "secret" not in json.dumps(result)
+
+
+def test_video_above_old_100_and_200_mib_limits_is_published(tmp_path, media_fixtures):
+    config = WebConfig(tmp_path / "data")
+    store = JobStore(config)
+    job = store.create(URL)
+    try:
+        fixture_worker(config, store, tmp_path, media_fixtures[0], "video_large").run_once()
+        result = store.get(job["id"])
+        assert result["status"] == "success"
+        assert result["files"][0]["bytes"] == 210763776
+    finally:
         store.cleanup(job["id"])

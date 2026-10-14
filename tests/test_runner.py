@@ -109,3 +109,32 @@ async def test_report_write_failure_still_returns_non_success(tmp_path, monkeypa
     result = await runner.run_download("bad input", file, True)
     assert result["status"] == "failed"
     assert result["report_write_failed"] is True
+
+
+async def test_adjustable_video_limit_reaches_transfer_and_reports_limit(tmp_path, pipeline, monkeypatch):
+    observed = []
+    def save(resource, path, headers, max_bytes, cancel=None):
+        observed.append(max_bytes)
+        return pipeline(resource, path, headers, max_bytes, cancel)
+    monkeypatch.setattr(runner, "download_resource", save)
+    result = await runner.run_download("https://www.douyin.com/video/7686430330920075249", tmp_path, True, video_limit_mib=2048)
+    assert result["status"] == "success"
+    assert observed == [2147483648]
+    assert result["limits"]["video_bytes"] == 2147483648
+
+
+async def test_video_size_failure_preserves_actual_size_for_ui(tmp_path, pipeline, monkeypatch):
+    from lumabox.errors import LumaBoxError
+    def oversized(*args, **kwargs):
+        raise LumaBoxError("SIZE_LIMIT", diagnostics={"limit_bytes": 1048576, "actual_bytes": 2097152})
+    monkeypatch.setattr(runner, "download_resource", oversized)
+    result = await runner.run_download("https://www.douyin.com/video/7686430330920075249", tmp_path, True, video_limit_mib=1)
+    assert result["error"] == "SIZE_LIMIT"
+    assert result["diagnostics"]["actual_bytes"] == 2097152
+    assert result["diagnostics"]["limit_bytes"] == 1048576
+
+
+@pytest.mark.parametrize("limit", [0, -1, 8193, True, 1.5])
+async def test_invalid_video_limit_is_rejected_before_browser(tmp_path, limit):
+    result = await runner.run_download("https://www.douyin.com/video/7686430330920075249", tmp_path, True, video_limit_mib=limit)
+    assert result["error"] == "INVALID_INPUT"

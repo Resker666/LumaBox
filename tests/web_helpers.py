@@ -20,11 +20,19 @@ if mode == 'failed':
 if mode in ('CHALLENGE_REQUIRED','RESOURCE_TIMEOUT'):
     print(json.dumps({'status':'failed','error':mode,'diagnostics':{'reason':'private'}}))
     sys.exit(1)
+if mode == 'size_failed':
+    print(json.dumps({'status':'failed','error':'SIZE_LIMIT','work_id':'7686430330920075249','kind':'video',
+        'diagnostics':{'limit_bytes':1073741824,'actual_bytes':1610612736}}))
+    sys.exit(1)
 work_id='7686430330920075249'
 kind='gallery' if mode in ('gallery','gallery_large') else 'video'
 dest=root/(work_id+'-'+'a'*32)
 dest.mkdir(parents=True)
 data=Path(fixture).read_bytes()
+if mode == 'video_large':
+    import struct
+    free_size=201*1024*1024-len(data)
+    data += struct.pack('>I4s',free_size,b'free') + b'\0'*(free_size-8)
 if mode == 'gallery_large':
     data += b'\0' * (20*1024*1024-len(data))  # Storage fixture; no decode claim.
 name='01.jpg' if kind == 'gallery' else work_id+'.mp4'

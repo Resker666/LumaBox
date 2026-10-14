@@ -1,11 +1,10 @@
 import argparse
-import getpass
 import os
 import sys
-import warnings
 from pathlib import Path
 
 from .config import WebConfig, WebError
+from ..limits import DEFAULT_VIDEO_LIMIT_MIB
 
 
 def main(argv=None) -> int:
@@ -13,6 +12,8 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=8765, help="本机端口，默认 8765")
     parser.add_argument("--data", type=Path, default=Path("WebData"), help="私有任务和文件目录")
     parser.add_argument("--headless", action="store_true", help="不显示下载浏览器窗口；当前网络需另行验证")
+    parser.add_argument("--output", type=Path, default=None, help="长期保存目录，默认数据目录旁的 Output")
+    parser.add_argument("--video-limit-mib", type=int, default=DEFAULT_VIDEO_LIMIT_MIB, help="单视频上限 MiB，1～8192，默认 1024；网页可逐任务调整")
     args = parser.parse_args(argv)
     try:
         import uvicorn
@@ -21,18 +22,12 @@ def main(argv=None) -> int:
         print('请先安装网页依赖：python -m pip install -e ".[web]"', file=sys.stderr)
         return 1
     try:
-        config = WebConfig(args.data, args.port, args.headless)
-        password = os.environ.pop("LUMABOX_WEB_PASSWORD", None)
-        if password is None:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", getpass.GetPassWarning)
-                password = getpass.getpass("设置本次访问密码（至少 12 字符，输入不显示）：")
-        app = create_app(config, password)
-        del password
-    except (WebError, getpass.GetPassWarning, EOFError) as exc:
-        code = exc.code if isinstance(exc, WebError) else "PASSWORD_INPUT"
-        messages = {"INVALID_PASSWORD": "访问密码须为 12～4096 字符。", "INVALID_CONFIG": "端口或数据目录不正确。",
-                    "PASSWORD_INPUT": "当前终端无法隐藏输入。请在交互终端运行，或设置 LUMABOX_WEB_PASSWORD。"}
+        config = WebConfig(args.data, args.port, args.headless, output=args.output, video_limit_mib=args.video_limit_mib)
+        os.environ.pop("LUMABOX_WEB_PASSWORD", None)  # Discard the obsolete credential, including from child environments.
+        app = create_app(config)
+    except WebError as exc:
+        code = exc.code
+        messages = {"INVALID_CONFIG": "端口、保存目录或视频上限不正确；上限须为 1～8192 MiB。"}
         print(messages.get(code, "无法启动光匣，请检查配置。"), file=sys.stderr)
         return 1
     print(f"光匣地址：http://127.0.0.1:{config.port} · 按 Ctrl+C 停止")

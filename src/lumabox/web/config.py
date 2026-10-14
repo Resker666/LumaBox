@@ -2,6 +2,8 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from ..limits import DEFAULT_VIDEO_LIMIT_MIB, video_limit_bytes
+from ..errors import LumaBoxError
 
 
 class WebError(Exception):
@@ -20,10 +22,12 @@ class WebConfig:
     data_dir: Path
     port: int = 8765
     headless: bool = False
-    task_timeout: float = 900
-    capacity_bytes: int = 2 * 1024**3
+    task_timeout: float = 3600
+    capacity_bytes: int | None = None
     reserve_bytes: int = 512 * 1024**2
-    retention_seconds: int = 86400
+    retention_seconds: int | None = None
+    output: Path | None = None
+    video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB
 
     def __post_init__(self):
         if not 1 <= self.port <= 65535 or self.task_timeout <= 0:
@@ -32,10 +36,18 @@ class WebConfig:
         if original.exists() and is_link(original):
             raise WebError("INVALID_CONFIG")
         object.__setattr__(self, "data_dir", original.resolve())
+        output = Path(self.output).absolute() if self.output is not None else self.data_dir.parent / "Output"
+        if output.exists() and is_link(output):
+            raise WebError("INVALID_CONFIG")
+        object.__setattr__(self, "output", output.resolve())
+        try:
+            video_limit_bytes(self.video_limit_mib)
+        except LumaBoxError:
+            raise WebError("INVALID_CONFIG") from None
 
     @property
     def output_dir(self) -> Path:
-        return self.data_dir / "outputs"
+        return self.output
 
 
 class InstanceLock:

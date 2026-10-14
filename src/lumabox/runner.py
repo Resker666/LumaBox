@@ -11,13 +11,12 @@ from pathlib import Path
 
 from .browser import BrowserSession
 from .errors import LumaBoxError
+from .limits import DEFAULT_VIDEO_LIMIT_MIB, IMAGE_LIMIT, GALLERY_LIMIT, video_limit_bytes
 from .transfer import download_resource
 from .urls import parse_input
 from .verify import verify_file
 
-VIDEO_LIMIT = 100 * 1024 * 1024
-IMAGE_LIMIT = 20 * 1024 * 1024
-GALLERY_LIMIT = 200 * 1024 * 1024
+VIDEO_LIMIT = DEFAULT_VIDEO_LIMIT_MIB * 1024 * 1024
 
 
 def make_zip(directory: Path, work_id: str, names: list[str]):
@@ -46,7 +45,7 @@ def _write_report(path: Path, result: dict):
         file.write("\n")
 
 
-async def run_download(text: str, output: Path, headless: bool = False) -> dict:
+async def run_download(text: str, output: Path, headless: bool = False, *, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB) -> dict:
     run_id = uuid.uuid4().hex
     root = output.resolve()
     temporary = None
@@ -59,6 +58,8 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
               "actual_count": 0, "files": [], "bytes": 0, "checks": {"full_decode": False},
               "headless": headless, "http_status": None, "output_directory": None}
     try:
+        video_limit = video_limit_bytes(video_limit_mib)
+        result["limits"] = {"video_bytes": video_limit, "image_bytes": IMAGE_LIMIT, "gallery_bytes": GALLERY_LIMIT}
         link = parse_input(text)
         result.update(work_id=link.work_id, kind=link.kind)
         stage = "output_setup"
@@ -84,13 +85,13 @@ async def run_download(text: str, output: Path, headless: bool = False) -> dict:
             for resource in work.resources:
                 name = f"{work.work_id}.mp4" if work.kind == "video" else f"{resource.order:02d}.jpg"
                 path = temporary / name
-                limit = VIDEO_LIMIT if work.kind == "video" else min(IMAGE_LIMIT, GALLERY_LIMIT - result["bytes"])
+                limit = video_limit if work.kind == "video" else min(IMAGE_LIMIT, GALLERY_LIMIT - result["bytes"])
                 if limit <= 0:
-                    raise LumaBoxError("SIZE_LIMIT", "Gallery exceeds the total size limit")
+                    raise LumaBoxError("SIZE_LIMIT", "Gallery exceeds the total size limit", diagnostics={"limit_bytes": GALLERY_LIMIT})
                 stage = "media_transfer"
                 count = await _blocking(download_resource, resource, path, headers, limit, cancel, cancel=cancel)
                 if count > limit:
-                    raise LumaBoxError("SIZE_LIMIT", "Media exceeds the size limit")
+                    raise LumaBoxError("SIZE_LIMIT", "Media exceeds the size limit", diagnostics={"limit_bytes": limit, "actual_bytes": count})
                 stage = "media_verification"
                 verified = await _blocking(verify_file, path, work.kind, cancel=cancel)
                 if verified.name != path.name:

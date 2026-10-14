@@ -1,4 +1,4 @@
-import json
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -7,17 +7,17 @@ from starlette.background import BackgroundTask
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
-from .auth import Auth, COOKIE
 from .config import WebConfig, WebError
+from .folders import open_folder
 from .store import JobStore
 from .worker import JobWorker
 
 MESSAGES = {
-    "LOGIN_REQUIRED": "请先登录光匣。", "LOGIN_FAILED": "密码不正确，请重试。",
-    "LOGIN_LIMIT": "尝试次数过多，请一分钟后再试。", "FORBIDDEN": "请求校验失败，请刷新页面重试。",
+    "FORBIDDEN": "请求校验失败，请刷新页面重试。",
     "INVALID_REQUEST": "请求格式不正确。", "BODY_TOO_LARGE": "提交内容过长，请缩短后重试。",
     "JSON_REQUIRED": "请提交 JSON 格式的请求。", "INVALID_INPUT": "请粘贴一条抖音视频或图集链接。",
-    "AUTHORIZATION_REQUIRED": "请先确认你有权下载此作品。", "QUEUE_FULL": "等待队列已满，请稍后再试。",
+    "QUEUE_FULL": "等待队列已满，请稍后再试。", "ALREADY_QUEUED": "此任务已有重试正在等待或运行。",
+    "NOT_RETRYABLE": "此任务当前无需重试。", "FOLDER_OPEN_UNAVAILABLE": "暂时无法打开文件夹，可按保存位置查找或另存文件。",
     "NOT_FOUND": "任务或文件不存在，文件可能已过期。", "SERVER_ERROR": "暂时无法完成请求，请稍后重试。",
 }
 
@@ -52,6 +52,8 @@ class LocalBoundary:
             hosts = [value for key, value in scope["headers"] if key == b"host"]
             host = headers.get(b"host", b"").decode("latin-1")
             if len(hosts) != 1 or host not in self.hosts:
+                raise WebError("FORBIDDEN", 403)
+            if scope["path"].startswith("/api/") and headers.get(b"sec-fetch-site") == b"cross-site":
                 raise WebError("FORBIDDEN", 403)
             if scope["method"] not in ("GET", "HEAD", "OPTIONS"):
                 if headers.get(b"origin", b"").decode("latin-1") != "http://" + host:
@@ -99,8 +101,8 @@ async def object_body(request: Request) -> dict:
         raise WebError("INVALID_REQUEST") from None
 
 
-def create_app(config: WebConfig, password: str, worker: JobWorker | None = None) -> FastAPI:
-    auth = Auth(password)
+def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
+    csrf = secrets.token_urlsafe(32)
     store = worker.store if worker is not None else JobStore(config)
     worker = worker if worker is not None else JobWorker(config, store)
 
@@ -124,56 +126,55 @@ def create_app(config: WebConfig, password: str, worker: JobWorker | None = None
     async def server_error(request, exc):
         return error_response(WebError("SERVER_ERROR", 500))
 
-    def session(request, write=False):
-        return auth.session(request.cookies.get(COOKIE), request.headers.get("x-csrf-token"), write=write)
-
-    @app.post("/api/login")
-    async def login(request: Request):
-        body = await object_body(request)
-        if set(body) != {"password"}:
-            raise WebError("INVALID_REQUEST")
-        token, csrf = auth.login(body["password"])
-        response = JSONResponse({"csrf": csrf})
-        response.set_cookie(COOKIE, token, max_age=28800, httponly=True, samesite="strict", path="/")
-        return response
+    def write_guard(request):
+        token = request.headers.get("x-csrf-token", "")
+        if not secrets.compare_digest(token.encode("utf-8"), csrf.encode("ascii")):
+            raise WebError("FORBIDDEN", 403)
 
     @app.get("/api/session")
-    def get_session(request: Request):
-        return {"csrf": session(request)["csrf"], "retention_hours": 24, "pending_limit": 10}
-
-    @app.post("/api/logout")
-    def logout(request: Request):
-        session(request, write=True)
-        auth.logout(request.cookies.get(COOKIE))
-        response = JSONResponse({"status": "ok"})
-        response.delete_cookie(COOKIE, httponly=True, samesite="strict")
-        return response
+    def get_session():
+        return {"csrf": csrf, "video_limit_mib": config.video_limit_mib, "max_video_limit_mib": 8192,
+                "output_directory": str(config.output_dir), "pending_limit": 10, "persistent": True,
+                "image_limit_mib": 20, "gallery_limit_mib": 200, "gallery_count_limit": 50}
 
     @app.post("/api/jobs", status_code=202)
     async def submit_job(request: Request):
-        session(request, write=True)
+        write_guard(request)
         if worker.stopping.is_set():
             raise WebError("SERVER_ERROR", 503)
         body = await object_body(request)
-        if set(body) != {"input", "authorized"}:
+        if "input" not in body or set(body) - {"input", "video_limit_mib"}:
             raise WebError("INVALID_REQUEST")
-        if body["authorized"] is not True:
-            raise WebError("AUTHORIZATION_REQUIRED")
-        return store.create(body["input"])
+        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib))
+
+    @app.post("/api/jobs/{job_id}/retry", status_code=202)
+    async def retry_job(job_id: str, request: Request):
+        write_guard(request)
+        if worker.stopping.is_set():
+            raise WebError("SERVER_ERROR", 503)
+        body = await object_body(request)
+        if set(body) - {"video_limit_mib"}:
+            raise WebError("INVALID_REQUEST")
+        return store.retry(job_id, body.get("video_limit_mib", config.video_limit_mib))
+
+    @app.post("/api/jobs/{job_id}/open-folder")
+    async def show_folder(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        open_folder(store.folder(job_id))
+        return {"status": "ok"}
 
     @app.get("/api/jobs")
     def list_jobs(request: Request):
-        session(request)
         return {"jobs": store.list()}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str, request: Request):
-        session(request)
         return store.get(job_id)
 
     @app.get("/api/files/{file_id}")
     def download(file_id: str, request: Request):
-        session(request)
         lease = store.open_file(file_id)
         file, stream = lease.__enter__()
         released = False

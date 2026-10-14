@@ -47,7 +47,7 @@ def verify_file(path: Path, kind: str) -> VerifiedFile:
         command = ["ffmpeg", "-v", "error", "-xerror", "-nostdin", *input_options, "-i", str(path), "-map", "0:v:0"]
         if kind == "video":
             command.extend(["-map", "0:a?"])
-        subprocess.run(command + ["-f", "null", "-"], capture_output=True, timeout=180, check=True)
+        subprocess.run(command + ["-f", "null", "-"], capture_output=True, timeout=900 if kind == "video" else 180, check=True)
         with path.open("rb") as file:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
         name = path.with_suffix(extension).name if kind == "gallery" else path.name
