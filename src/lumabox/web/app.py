@@ -13,6 +13,7 @@ from .folders import open_folder
 from .media import preview_response
 from .store import JobStore
 from .worker import JobWorker
+from .access import CloudAccess, AccessBoundary, COOKIE
 
 MESSAGES = {
     "FORBIDDEN": "请求校验失败，请刷新页面重试。",
@@ -106,6 +107,7 @@ async def object_body(request: Request) -> dict:
 
 
 def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
+    access = CloudAccess(Path(config.access_file)) if config.access_file is not None else None
     csrf = secrets.token_urlsafe(32)
     store = worker.store if worker is not None else JobStore(config)
     worker = worker if worker is not None else JobWorker(config, store)
@@ -120,6 +122,8 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
+    if access is not None:
+        app.add_middleware(AccessBoundary, access=access)
     app.add_middleware(LocalBoundary, port=config.port)
 
     @app.exception_handler(WebError)
@@ -139,6 +143,7 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
     def get_session():
         return {"csrf": csrf, "application": "lumabox", "version": __version__,
                 "remote_mode": config.remote_mode,
+                "access_protected": access is not None,
                 "data_directory": str(config.data_dir),
                 "video_limit_mib": config.video_limit_mib, "max_video_limit_mib": 8192,
                 "output_directory": str(config.output_dir), "pending_limit": 10, "persistent": True,
@@ -234,6 +239,40 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
             background=BackgroundTask(release))
 
     static = Path(__file__).parent / "static"
+
+    if access is not None:
+        @app.get("/login")
+        def login_page():
+            return FileResponse(static / "login.html", media_type="text/html")
+
+        @app.post("/auth/login")
+        async def login(request: Request):
+            body = await object_body(request)
+            password, remember = body.get("password"), body.get("remember", False)
+            if (set(body) - {"password", "remember"} or not isinstance(password, str)
+                    or not 1 <= len(password) <= 256 or type(remember) is not bool):
+                raise WebError("INVALID_REQUEST")
+            try:
+                password.encode("utf-8")
+            except UnicodeError:
+                raise WebError("INVALID_REQUEST") from None
+            token = access.login(password, remember, request.cookies.get(COOKIE))
+            if not isinstance(token, str):
+                return token
+            response = JSONResponse({"status": "ok"})
+            response.set_cookie(COOKIE, token, max_age=604800 if remember else None,
+                                httponly=True, samesite="strict", secure=config.secure_cookie)
+            return response
+
+        @app.post("/auth/logout")
+        async def logout(request: Request):
+            write_guard(request)
+            if await object_body(request):
+                raise WebError("INVALID_REQUEST")
+            access.logout(request.cookies.get(COOKIE))
+            response = JSONResponse({"status": "ok"})
+            response.delete_cookie(COOKIE, httponly=True, samesite="strict", secure=config.secure_cookie)
+            return response
 
     @app.get("/")
     def index():

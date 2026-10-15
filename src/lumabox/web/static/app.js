@@ -52,6 +52,7 @@ async function api(path, body) {
   try { response = await fetch(path, options); }
   catch { throw new Error("暂时无法连接光匣，请稍后重试。"); }
   const data = await response.json();
+  if (response.status === 401 && data.error === "LOGIN_REQUIRED") window.location.replace("/login");
   if (!response.ok) throw new Error(data.message || "暂时无法完成请求，请稍后重试。");
   return data;
 }
@@ -411,6 +412,7 @@ async function start() {
   try {
     const settings = await api("/api/session");
     csrf = settings.csrf;
+    $("logout-button").hidden = settings.access_protected !== true;
     remoteMode = settings.remote_mode === true;
     if (remoteMode) {
       $("workspace-label").textContent = "云端工作台";
@@ -433,4 +435,15 @@ async function start() {
     timer = setTimeout(start, 3000);
   }
 }
+$("logout-button").addEventListener("click", async () => {
+  $("logout-button").disabled = true;
+  try {
+    await api("/auth/logout", {});
+    clearTimeout(timer);
+    window.location.replace("/login");
+  } catch (error) {
+    notice("action-error", error.message);
+    $("logout-button").disabled = false;
+  }
+});
 start();

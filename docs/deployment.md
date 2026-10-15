@@ -23,9 +23,17 @@ mkdir -p WebData/cache WebData/config Output
 
 将 [服务模板](../deploy/lumabox.service) 安装到 systemd，执行 `systemd-analyze verify` 后再 `systemctl enable --now lumabox`。更新时先确认没有活动任务，记录旧提交并备份 SQLite，再切换代码、更新虚拟环境和重启服务；失败时切回旧提交。不要用新空数据库覆盖原历史。
 
+## 云端登录
+
+0.4.3 使用光匣自己的登录页，云端只需输入访问密码。凭据文件 `WebData/access.json` 至少包含一个非空的 `password` 字符串，由 dev 持有、权限 0600，不提交 Git。服务用 `--access-file /home/dev/develop/lumabox/WebData/access.json` 启用保护；读取失败或格式错误时拒绝启动，文件路径不传给下载子进程。
+
+会话使用随机令牌和 HttpOnly / SameSite=Strict Cookie，令牌本身不包含密码。可勾选记住登录 7 天，不勾选时使用浏览器会话 Cookie且服务端最多保留 8 小时；服务重启或点击退出会要求重新登录。连续 5 次密码错误后短暂限流。收藏列表、下载和预览都要求有效会话。默认本地运行不指定 access-file，继续免登录。
+
+从旧 Nginx Basic 认证迁移时，先保留旧认证、启用应用保护，确认回环匿名 API 已返回 401、正确密码可建立会话后，才移除 Nginx Basic 认证，避免迁移期间暴露收藏。沿用旧访问密码时可只从原私有凭据文件复制 password 字段，不需重新设置密码。
+
 ## HTTPS 入口
 
-程序始终只监听 `127.0.0.1:8765`。公网由 [Nginx 模板](../deploy/lumabox-site.conf) 提供 HTTPS 与独立的 HTTP Basic 认证；这是云端入口密码，本地版仍直接使用，抖音浏览器仍为匿名会话。
+程序始终只监听 `127.0.0.1:8765`。公网由 [Nginx 模板](../deploy/lumabox-site.conf) 提供 HTTPS，应用通过 access-file 保护云端入口。[服务模板](../deploy/lumabox.service) 同时启用 `--secure-cookie`，确保登录 Cookie 只通过 HTTPS 发送。本地版仍直接使用，抖音浏览器仍为匿名会话。
 
 模板要包含在实际运行的 Nginx `http` 块中。当前服务器使用 `/etc/nginx/ghost-chat.conf`，不是发行版默认配置。变更前备份该文件，不覆盖其他站点，使用以下命令验证后才重载：
 
@@ -34,9 +42,9 @@ nginx -t -c /etc/nginx/ghost-chat.conf
 systemctl reload nginx
 ```
 
-证书需包含实际完整子域名，现有其他站点的证书不能直接复用。HTTP-01 使用 `/var/lib/ghost-chat-acme`；创建仅含账号密码哈希的 `/etc/nginx/lumabox.htpasswd`，root 所有、www-data 可读，权限 0640。密码不写入模板或提交记录。
+证书需包含实际完整子域名，现有其他站点的证书不能直接复用。HTTP-01 使用 `/var/lib/ghost-chat-acme`；访问密码只放在私有 access-file 中，不写入模板或提交记录。
 
-Nginx 先校验来自浏览器的公网 Origin，再将 Host / Origin 翻译为本机服务接受的值；原有 CSRF、跨站请求和请求体上限继续生效。不把未经认证的外部请求转发到应用，不开放 8765 公网端口。
+Nginx 先校验来自浏览器的公网 Origin，再将 Host / Origin 翻译为本机服务接受的值；原有 CSRF、跨站请求和请求体上限继续生效。应用对未经认证的页面请求跳转登录，对收藏及文件 API 返回 401；不开放 8765 公网端口。
 
 证书申请成功后安装 [续期钩子](../deploy/lumabox-renew-hook.sh) 到 `/etc/letsencrypt/renewal-hooks/deploy/` 并赋予可执行权限，确认 certbot 定时器和续期演练。钩子只处理本站证书，使用实际配置测试成功才重载 Nginx。
 
@@ -46,9 +54,9 @@ Nginx 先校验来自浏览器的公网 Origin，再将 Host / Origin 翻译为�
 
 当前应用使用 `/etc/systemd/system/lumabox.service.d/private-preview.conf` 覆盖启动命令，将回环端口临时设为 18765；数据目录、输出目录和 dev 用户保持不变。Nginx 对 IP 入口先校验公网 Origin，再翻译到该回环端口。公网仅使用已有 80 端口，没有开放应用端口。
 
-认证账号为 lumabox，使用独立随机密码。服务器凭据位于 `WebData/ip-preview-access.json`，密码哈希位于 `/etc/nginx/lumabox-preview.htpasswd`（root:www-data 0640）。凭据没有提交 Git。此入口为 HTTP，不具备 HTTPS 的传输加密；临时密码不应复用到其他服务。
+原 Nginx 认证使用独立随机密码，旧凭据位于 `WebData/ip-preview-access.json`。升级后将同一密码接入 `WebData/access.json`，网页不再要求输入用户名；停用 Basic 认证后移除旧的 htpasswd 文件。凭据没有提交 Git。此入口为 HTTP，不具备 HTTPS 的传输加密，临时覆盖启动命令不启用 secure-cookie；临时密码不应复用到其他服务。
 
-切换正式域名时，先确认无活动任务并备份数据库；移除预览 drop-in 后 daemon-reload / restart，确认应用回到 127.0.0.1:8765；再启用域名 HTTPS 配置，移除 IP 入口 include，配置验证成功后重载。完成域名实测后删除临时密码文件和私人凭据副本。
+切换正式域名时，先确认无活动任务并备份数据库；移除预览 drop-in 后 daemon-reload / restart，确认应用回到 127.0.0.1:8765 且开启 access-file / secure-cookie；再启用域名 HTTPS 配置，移除 IP 入口 include，配置验证成功后重载。完成域名实测后清理旧 IP 入口凭据副本，保留应用实际使用的 access.json。
 
 ## 运维检查
 
