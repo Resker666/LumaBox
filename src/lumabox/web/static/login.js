@@ -19,13 +19,13 @@ form.addEventListener("submit", async (event) => {
   error.hidden = true;
   try {
     const response = await fetch("/auth/login", {
-      method: "POST", mode: "same-origin", credentials: "same-origin", cache: "no-store",
+      method: "POST", mode: "same-origin", referrerPolicy: "same-origin", credentials: "same-origin", cache: "no-store",
       headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(12000),
       body: JSON.stringify({ password: password.value, remember: document.getElementById("remember-login").checked })
     });
     let result;
     try { result = await response.json(); }
-    catch { throw new Error("服务暂时不可用，请稍后重试。"); }
+    catch { throw new Error(response.status === 403 ? "请求校验未通过，请刷新页面后重试。" : "服务暂时不可用，请稍后重试。"); }
     if (!response.ok) throw new Error(result.message || "暂时无法登录，请稍后重试。");
     password.value = "";
     window.location.replace("/");

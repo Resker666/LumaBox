@@ -91,6 +91,7 @@ def test_sessions_expire_and_failures_are_rate_limited(protected, monkeypatch):
 @pytest.mark.parametrize("headers,body,status", [
     ({"Origin": "https://evil.example"}, {"password": PASSWORD}, 403),
     ({}, {"password": PASSWORD}, 403),
+    ({"Origin": "null"}, {"password": PASSWORD}, 403),
     ({"Origin": ORIGIN}, {"password": 123}, 400),
     ({"Origin": ORIGIN}, {"password": PASSWORD, "remember": "yes"}, 400),
     ({"Origin": ORIGIN}, {"password": "x" * 9000}, 413),
@@ -184,5 +185,43 @@ def test_login_form_remember_download_logout_and_mobile(login_server, browser, t
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.screenshot(path=str(directory / "login-mobile.png"), full_page=True)
         assert not errors
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("browser", ["webkit"], indirect=True)
+def test_webkit_login_and_task_writes_keep_same_origin(login_server, browser):
+    # Catches Safari serializing Origin as null when same-origin fetch inherits no-referrer.
+    context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+    page = context.new_page()
+    posts = []
+    page.on("request", lambda request: posts.append((request.url.split(login_server)[-1], request.headers.get("origin"))) if request.method == "POST" else None)
+    try:
+        page.goto(login_server)
+        page.get_by_label("访问密码", exact=True).fill(PASSWORD)
+        with page.expect_response(lambda response: response.url.endswith("/auth/login")) as response:
+            page.get_by_role("button", name="进入光匣", exact=True).click()
+        assert response.value.status == 200, {"status": response.value.status, "posts": posts}
+        expect(page.get_by_label("作品链接或分享文案")).to_be_visible()
+        submit(page, URL)
+        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_be_visible(timeout=15000)
+        page.get_by_role("button", name="退出登录", exact=True).click()
+        expect(page.get_by_label("访问密码", exact=True)).to_be_visible()
+        assert dict(posts) == {"/auth/login": login_server, "/api/jobs": login_server, "/auth/logout": login_server}
+        assert page.request.get(login_server + "/api/jobs").status == 401
+    finally:
+        context.close()
+
+
+def test_login_reports_proxy_rejection_as_request_error(login_server, browser):
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.route("**/auth/login", lambda route: route.fulfill(status=403, content_type="text/html", body="<h1>403 Forbidden</h1>"))
+        page.goto(login_server)
+        page.get_by_label("访问密码", exact=True).fill(PASSWORD)
+        page.get_by_role("button", name="进入光匣", exact=True).click()
+        expect(page.get_by_role("alert")).to_contain_text("请求校验")
+        expect(page.get_by_role("button", name="进入光匣", exact=True)).to_be_enabled()
     finally:
         context.close()

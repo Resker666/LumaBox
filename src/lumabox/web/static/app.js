@@ -41,7 +41,7 @@ function notice(id, message) {
 }
 
 async function api(path, body) {
-  const options = { cache: "no-store", mode: "same-origin", credentials: "same-origin", headers: {}, signal: AbortSignal.timeout(12000) };
+  const options = { cache: "no-store", mode: "same-origin", referrerPolicy: "same-origin", credentials: "same-origin", headers: {}, signal: AbortSignal.timeout(12000) };
   if (body !== undefined) {
     options.method = "POST";
     options.headers["Content-Type"] = "application/json";

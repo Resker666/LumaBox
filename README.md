@@ -2,7 +2,7 @@
 
 通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前开发版本为 **0.4.3**（云端登录体验），已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[云部署说明](docs/deployment.md)、[云部署验收](docs/validation/2026-10-15-cloud-deploy.md)、[取消与网络诊断验证](docs/validation/2026-10-15-cancel-diagnostics.md)、[日常体验验证记录](docs/validation/2026-10-14-daily-use.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
+当前开发版本为 **0.4.4**（Safari 登录兼容），已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[云部署说明](docs/deployment.md)、[云部署验收](docs/validation/2026-10-15-cloud-deploy.md)、[取消与网络诊断验证](docs/validation/2026-10-15-cancel-diagnostics.md)、[日常体验验证记录](docs/validation/2026-10-14-daily-use.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
 
 ## 当前验证状态
 
@@ -130,6 +130,8 @@ Windows 默认显示下载用的 Chromium 窗口，与已实测成功的 CLI 一
 ```
 
 默认测试不访问抖音：运行真实 Chromium、测试 HTTP 服务和 FFmpeg，使用合成页面及新生成媒体。测试环境需允许浏览器进程和回环网络连接。
+
+Safari 兼容回归使用真实 WebKit，引擎未安装时单独跳过该项。需要完整验证时先运行 `.\.venv\Scripts\python.exe -m playwright install webkit`，再执行测试；手机尺寸的 Chromium 测试不能替代 WebKit 验证。
 
 此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已确认用户正常网络的默认有界面 CLI 成功取得 1080p、124.6 秒的 H.264/AAC 视频，以及完整 12 张图集。实际文件已再次完整解码，图集 ZIP 内容与报告一致。该成功没有启用临时公网 DNS 诊断解析器；返回非公网映射的 VPN DNS 仍会被拒绝。Windows 10054 连接关闭回调仍有输出，尚未修复。Ubuntu 云服务器已通过同样两个作品的有界面 CLI 验证；无头和其他作品需分别实测。网页验证范围见[网页记录](docs/validation/2026-10-13-local-web.md)。
 
