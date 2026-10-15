@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlsplit
 from .errors import LumaBoxError, check_status
 from .net import PinnedHTTPSConnection, resolve_public, bounded_call
 from .urls import validate_media_url
+from .diagnostics import network_reason
 
 IDLE_TIMEOUT = 15.0
 TOTAL_TIMEOUT = 1800.0
@@ -82,6 +83,7 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
             remaining()
             validate_media_url(url)
             parts = urlsplit(url)
+            diagnostics["host"] = parts.hostname
             ips = resolve_public(parts.hostname, timeout=remaining(), cancel=cancel)
             headers = bounded_call(lambda: headers_for_url(url), remaining(), cancel)
             conn = PinnedHTTPSConnection(parts.hostname, ips[0], remaining())
@@ -156,10 +158,13 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
             except LumaBoxError as stopped:
                 exc = stopped
         if isinstance(exc, LumaBoxError):
-            exc.diagnostics.update(diagnostics)
+            exc.diagnostics = {**diagnostics, **exc.diagnostics}
             raise exc from None
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
+        reason = network_reason(exc)
+        if reason:
+            diagnostics["network_reason"] = reason
         if isinstance(exc, (socket.timeout, TimeoutError)):
             raise LumaBoxError("RESOURCE_TIMEOUT", "Media connection timed out", diagnostics=diagnostics) from None
         raise LumaBoxError("DOWNLOAD_FAILED", "Media could not be saved", diagnostics=diagnostics) from None

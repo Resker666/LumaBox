@@ -99,6 +99,7 @@ class JobWorker:
                     while process.poll() is None:
                         if self.stopping.wait(.05):
                             raise WebError("INTERRUPTED")
+                        self._check_cancelled(job["id"])
                         if time.monotonic() - start > self.config.task_timeout:
                             raise WebError("TIMEOUT")
                         if output.stat().st_size > 256 * 1024:
@@ -111,6 +112,7 @@ class JobWorker:
                             last_progress = snapshot
             if self.stopping.is_set():
                 raise WebError("INTERRUPTED")
+            self._check_cancelled(job["id"])
             if output.stat().st_size > 256 * 1024:
                 raise WebError("VERIFY_FAILED")
             snapshot = self._read_progress(progress_path)
@@ -137,9 +139,20 @@ class JobWorker:
             self.store.finish(job["id"], result, files)
         except Exception as exc:
             code = exc.code if isinstance(exc, WebError) and exc.code in ERRORS else "VERIFY_FAILED"
-            self.store.fail(job["id"], code, result)
             self.store.try_cleanup(job["id"])
+            self.store.fail(job["id"], code, result)
         return True
+
+    def _check_cancelled(self, job_id):
+        if self.store.is_cancelling(job_id):
+            raise WebError("INTERRUPTED")
+
+    def _digest(self, stream, job_id):
+        digest = hashlib.sha256()
+        while block := stream.read(1024 * 1024):
+            self._check_cancelled(job_id)
+            digest.update(block)
+        return digest.hexdigest()
 
     def _verify(self, job, directory, result):
         work_id, run_id, kind = result["work_id"], result["run_id"], result["kind"]
@@ -162,6 +175,7 @@ class JobWorker:
             raise WebError("VERIFY_FAILED")
         files = []
         for index, entry in enumerate(entries, 1):
+            self._check_cancelled(job["id"])
             name = entry["name"]
             valid_name = name == f"{work_id}.mp4" if kind == "video" else bool(re.fullmatch(fr"{index:02d}\.(jpg|webp)", name))
             if not valid_name or type(entry["bytes"]) is not int or entry["bytes"] <= 0:
@@ -172,7 +186,7 @@ class JobWorker:
                     not isinstance(entry["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])):
                 raise WebError("VERIFY_FAILED")
             with path.open("rb") as stream:
-                if hashlib.file_digest(stream, "sha256").hexdigest() != entry["sha256"]:
+                if self._digest(stream, job["id"]) != entry["sha256"]:
                     raise WebError("VERIFY_FAILED")
             if any(type(entry[k]) is not int or entry[k] <= 0 for k in ("width", "height")):
                 raise WebError("VERIFY_FAILED")
@@ -189,6 +203,7 @@ class JobWorker:
                 if original.namelist() != [f["name"] for f in files] + ["report.json"]:
                     raise WebError("VERIFY_FAILED")
                 for file in files:
+                    self._check_cancelled(job["id"])
                     info = original.getinfo(file["name"])
                     if info.file_size != file["bytes"] or hashlib.sha256(original.read(info)).hexdigest() != file["sha256"]:
                         raise WebError("VERIFY_FAILED")
@@ -200,13 +215,14 @@ class JobWorker:
             replacement = dest / "images.tmp"
             with zipfile.ZipFile(replacement, "x", compression=zipfile.ZIP_STORED) as output:
                 for file in files:
+                    self._check_cancelled(job["id"])
                     output.write(dest / file["name"], file["name"])
                     if self.config.capacity_bytes is not None and self.store.usage() > self.config.capacity_bytes:
                         raise WebError("STORAGE_FULL")
                 output.writestr("report.json", json.dumps(public_report, ensure_ascii=False, indent=2))
             replacement.replace(archive)
             with archive.open("rb") as stream:
-                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                digest = self._digest(stream, job["id"])
             files.append({"name": archive.name, "bytes": archive.stat().st_size, "sha256": digest,
                           "relative_path": str(archive.relative_to(self.config.output_dir)), "mime": "application/zip"})
         return files

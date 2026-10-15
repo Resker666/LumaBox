@@ -94,6 +94,11 @@ textarea { display:block; resize:vertical; min-height:115px; max-height:320px; }
 .job-status { padding:3px 10px; border-radius:20px; background:#f2f2e9; color:#8b927b; font-size:11px; white-space:nowrap; display:flex; align-items:center; gap:5px; }
 .job-status.success { background:#eaf2e8; color:#507d58; }.job-status.failed { background:#fbebe3; color:#aa6548; }.job-status.running { background:#fbefdf; color:#b37c43; }
 .job-status.running::before { content:""; width:6px; height:6px; background:currentColor; border-radius:50%; animation:breathe 1.5s infinite; }
+.job-status.cancelling { background:#fbefdf; color:#9a774d; }
+.job-status.cancelled { background:#eeeee8; color:#777e70; }
+.cancel-button { border:1px solid #e3cbb8; border-radius:8px; padding:8px 15px; font-size:12px; color:#a36946; background:#fff9f2; }
+.cancel-button:hover:enabled { background:#fbefe3; border-color:#cba27f; }
+.cancel-button:disabled { opacity:.5; cursor:wait; }
 .job-detail { color:#808b74; font-size:12px; margin-top:9px; }
 .job-detail.failed { color:#a46d54; }
 .file-links { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }

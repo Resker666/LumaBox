@@ -19,6 +19,7 @@ from ..urls import parse_input
 from ..limits import DEFAULT_VIDEO_LIMIT_MIB, video_limit_bytes
 from ..metadata import normalize_title
 from ..progress import sanitize_snapshot
+from ..diagnostics import public_diagnostics
 from .config import WebConfig, WebError, is_link
 
 ID = re.compile(r"[0-9a-f]{32}")
@@ -97,14 +98,14 @@ class JobStore:
         with self.lock:
             with self.connection() as db:
                 row = db.execute("SELECT url,status FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row["status"] not in ("failed", "expired"):
+            if row["status"] not in ("failed", "expired", "cancelled"):
                 raise WebError("NOT_RETRYABLE", 409)
             return self.create(row["url"], video_limit_mib, retry_of=job_id)
 
     def claim(self) -> dict | None:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM jobs WHERE status='running'").fetchone():
+            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','cancelling')").fetchone():
                 return None
             row = db.execute("SELECT * FROM jobs WHERE status='pending' AND hidden_at IS NULL ORDER BY created_at,rowid LIMIT 1").fetchone()
             if row is None:
@@ -126,7 +127,7 @@ class JobStore:
                           error_detail=json.loads(row["error_detail"] or "{}"), output_directory=None, files=[],
                           title=normalize_title(row["title"]), progress=json.loads(row["progress"] or "{}"))
             if row["started_at"] is not None:
-                end = time.time() if row["status"] == "running" else row["updated_at"]
+                end = time.time() if row["status"] in ("running", "cancelling") else row["updated_at"]
                 result["progress"]["elapsed_seconds"] = max(0, int(end - row["started_at"]))
             if row["status"] == "success":
                 result["files"] = [self.public_file(f) for f in db.execute("SELECT * FROM files WHERE job_id=? ORDER BY rowid", (job_id,))]
@@ -145,7 +146,7 @@ class JobStore:
 
     def search(self, q="", status="all", page=1, page_size=20) -> dict:
         if (not isinstance(q, str) or len(q) > 200 or
-                status not in ("all", "pending", "running", "success", "failed", "expired") or
+                status not in ("all", "pending", "running", "cancelling", "cancelled", "success", "failed", "expired") or
                 type(page) is not int or not 1 <= page <= 1_000_000 or
                 type(page_size) is not int or not 1 <= page_size <= 100):
             raise WebError("INVALID_REQUEST")
@@ -169,7 +170,7 @@ class JobStore:
     def remove(self, job_id: str) -> int:
         with self.lock:
             job = self.get(job_id)
-            if job["status"] in ("pending", "running"):
+            if job["status"] in ("pending", "running", "cancelling"):
                 raise WebError("JOB_ACTIVE", 409)
             with self.connection() as db:
                 return db.execute("UPDATE jobs SET hidden_at=? WHERE id=? AND hidden_at IS NULL", (time.time(), job_id)).rowcount
@@ -177,6 +178,21 @@ class JobStore:
     def clear_failed(self) -> int:
         with self.connection() as db:
             return db.execute("UPDATE jobs SET hidden_at=? WHERE status='failed' AND hidden_at IS NULL", (time.time(),)).rowcount
+
+    def cancel(self, job_id: str) -> dict:
+        with self.lock:
+            job = self.get(job_id)
+            if job["status"] not in ("pending", "running", "cancelling", "cancelled"):
+                raise WebError("NOT_CANCELLABLE", 409)
+            status = {"pending": "cancelled", "running": "cancelling"}.get(job["status"])
+            if status:
+                with self.connection() as db:
+                    db.execute("UPDATE jobs SET status=?,updated_at=? WHERE id=?", (status, time.time(), job_id))
+            return self.get(job_id)
+
+    def is_cancelling(self, job_id: str) -> bool:
+        with self.connection() as db:
+            return db.execute("SELECT 1 FROM jobs WHERE id=? AND status='cancelling'", (job_id,)).fetchone() is not None
 
     def update_progress(self, job_id: str, snapshot: dict) -> bool:
         if not isinstance(job_id, str) or not ID.fullmatch(job_id) or not isinstance(snapshot, dict):
@@ -225,10 +241,12 @@ class JobStore:
         result = result if isinstance(result, dict) else {}
         diagnostics = result.get("diagnostics")
         diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-        detail = {key: diagnostics[key] for key in ("limit_bytes", "actual_bytes", "at_least_bytes")
-                  if type(diagnostics.get(key)) is int and 0 <= diagnostics[key] < 2**63}
+        detail = public_diagnostics(diagnostics)
         with self.connection() as db:
             row = db.execute("SELECT work_id,kind,status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is not None and row["status"] == "cancelling":
+                db.execute("UPDATE jobs SET status='cancelled',error=NULL,error_detail='{}',updated_at=? WHERE id=?", (time.time(), job_id))
+                return
             if row is None or row["status"] not in ("pending", "running"):
                 return
             work_id, kind = result.get("work_id"), result.get("kind")
@@ -240,7 +258,7 @@ class JobStore:
 
     def recover(self):
         with self.connection() as db:
-            ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status='running'")]
+            ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling')")]
         for job_id in ids:
             self.fail(job_id, "INTERRUPTED")
             self.try_cleanup(job_id)
@@ -403,13 +421,13 @@ class JobStore:
     def expire(self, now: float | None = None):
         if self.config.retention_seconds is None:
             with self.connection() as db:
-                failed = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status='failed'")]
+                failed = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('failed','cancelled')")]
             for job_id in failed:
                 self.try_cleanup(job_id)
             return  # A local collection is permanent; only incomplete outputs are cleaned.
         now = time.time() if now is None else now
         with self.connection() as db:
-            ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE status IN ('success','failed') AND updated_at<?",
+            ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE status IN ('success','failed','cancelled') AND updated_at<?",
                                             (now - self.config.retention_seconds,))]
         for job_id in ids:
             with self.lock:

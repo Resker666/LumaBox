@@ -46,14 +46,21 @@ def bounded_call(function, timeout: float, cancel=None):
 
 
 def resolve_public(host: str, timeout: float = 15.0, cancel=None) -> tuple[str, ...]:
+    diagnostics = {"stage": "dns_resolution", "host": host}
     try:
         results = bounded_call(lambda: socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM), timeout, cancel)
         addresses = tuple(dict.fromkeys(item[4][0] for item in results))
         if not addresses or not all(is_public(ip) for ip in addresses):
-            raise LumaBoxError("UNSAFE_TARGET", "DNS returned a non-public destination")
+            raise LumaBoxError("UNSAFE_TARGET", "DNS returned a non-public destination",
+                              diagnostics={**diagnostics, "network_reason": "DNS_NON_PUBLIC"})
         return addresses
+    except LumaBoxError as exc:
+        if exc.code == "RESOURCE_TIMEOUT":
+            exc.diagnostics.update(diagnostics, network_reason="DNS_TIMEOUT")
+        raise
     except (OSError, ValueError):
-        raise LumaBoxError("UNSAFE_TARGET", "Public DNS resolution failed") from None
+        raise LumaBoxError("UNSAFE_TARGET", "Public DNS resolution failed",
+                          diagnostics={**diagnostics, "network_reason": "DNS_LOOKUP_FAILED"}) from None
 
 
 class PinnedHTTPSConnection(http.client.HTTPSConnection):

@@ -258,9 +258,11 @@ class BrowserSession:
         if navigation_failed:
             for failure in self.proxy.failures:
                 if failure["host"] in self.navigation_hosts | {initial_host}:
-                    self.diagnostics = {"stage": "page_navigation", "reason": "Browser network connection failed",
+                    self.diagnostics = {"stage": failure.get("stage", "page_navigation"), "reason": "Browser network connection failed",
                                         "host": failure["host"]}
-                    raise LumaBoxError(failure["code"], "Browser network connection failed")
+                    if failure.get("network_reason"):
+                        self.diagnostics["network_reason"] = failure["network_reason"]
+                    raise LumaBoxError(failure["code"], "Browser network connection failed", diagnostics=dict(self.diagnostics))
 
     async def load(self, link):
         self.expected_identity = (link.work_id, link.kind) if link.work_id else None
@@ -271,7 +273,7 @@ class BrowserSession:
         try:
             await asyncio.to_thread(resolve_public, host)
         except LumaBoxError as exc:
-            self.diagnostics["reason"] = exc.message
+            self.diagnostics.update(exc.diagnostics, reason=exc.message)
             raise
         self.diagnostics = {"stage": "page_navigation", "host": host}
         try:
