@@ -9,6 +9,8 @@ import time
 import zipfile
 from pathlib import Path
 from ..limits import GALLERY_LIMIT, IMAGE_LIMIT, MIB, video_limit_bytes
+from ..metadata import normalize_title
+from ..progress import read_progress
 
 from .config import InstanceLock, WebError
 from .process import ProcessTree
@@ -61,9 +63,17 @@ class JobWorker:
     def command(self, job, directory):
         command = [sys.executable, "-m", "lumabox", "--authorized", job["url"], "--output", str(directory)]
         command.extend(["--video-limit-mib", str(job["video_limit_mib"])])
+        command.extend(["--progress-file", str(directory / ".progress.json")])
         if self.config.headless:
             command.append("--headless")
         return command
+
+    def _read_progress(self, path):
+        try:
+            safe = self.store.safe_path(str(path.relative_to(self.config.output_dir)))
+        except (WebError, ValueError):
+            return None
+        return read_progress(safe)
 
     def run_once(self) -> bool:
         if self.stopping.is_set():
@@ -72,6 +82,8 @@ class JobWorker:
         if job is None:
             return False
         directory = self.config.output_dir / job["id"]
+        progress_path = directory / ".progress.json"
+        last_progress = None
         result = {}
         try:
             reserve = max(self.config.reserve_bytes, video_limit_bytes(job["video_limit_mib"]) + 64 * MIB, 2 * GALLERY_LIMIT + 64 * MIB)
@@ -93,21 +105,35 @@ class JobWorker:
                             raise WebError("VERIFY_FAILED")
                         if self.config.capacity_bytes is not None and self.store.usage() > self.config.capacity_bytes:
                             raise WebError("STORAGE_FULL")
+                        snapshot = self._read_progress(progress_path)
+                        if snapshot is not None and snapshot != last_progress:
+                            self.store.update_progress(job["id"], snapshot)
+                            last_progress = snapshot
             if self.stopping.is_set():
                 raise WebError("INTERRUPTED")
             if output.stat().st_size > 256 * 1024:
                 raise WebError("VERIFY_FAILED")
+            snapshot = self._read_progress(progress_path)
+            if snapshot is not None and snapshot != last_progress:
+                self.store.update_progress(job["id"], snapshot)
+                last_progress = snapshot
             result = json.loads(output.read_bytes().splitlines()[-1])
             if process.returncode != 0 or result.get("status") != "success":
                 code = result.get("error")
                 raise WebError(code if code in ERRORS else "DOWNLOAD_FAILED")
+            self.store.update_progress(job["id"], {**(last_progress or {}), "stage": "publication", "resource_index": None})
             files = self._verify(job, directory, result)
             if self.config.capacity_bytes is not None and self.store.usage() > self.config.capacity_bytes:
                 raise WebError("STORAGE_FULL")
-            try:
-                output.unlink()
-            except OSError:
-                pass  # Private auxiliary log is not part of publication.
+            self.store.update_progress(job["id"], {"stage": "publication", "work_id": result["work_id"],
+                "kind": result["kind"], "title": normalize_title(result.get("title")),
+                "bytes_received": result["bytes"], "bytes_total": result["bytes"] if result["kind"] == "video" else None,
+                "completed_count": result["actual_count"], "expected_count": result["expected_count"], "resource_index": None})
+            for auxiliary in (output, progress_path):
+                try:
+                    auxiliary.unlink(missing_ok=True)
+                except OSError:
+                    pass  # Private auxiliary files are not part of publication.
             self.store.finish(job["id"], result, files)
         except Exception as exc:
             code = exc.code if isinstance(exc, WebError) and exc.code in ERRORS else "VERIFY_FAILED"
@@ -168,6 +194,7 @@ class JobWorker:
                         raise WebError("VERIFY_FAILED")
             # The CLI's private report contains local paths. Publish a minimal portable report instead.
             public_report = {key: result[key] for key in ("work_id", "kind", "status", "expected_count", "actual_count", "bytes", "checks")}
+            public_report["title"] = normalize_title(result.get("title"))
             public_report["files"] = [{key: file[key] for key in ("name", "bytes", "sha256", "width", "height", "duration")} for file in files]
             archive.unlink()  # Verified, rebuildable ZIP; avoid a third full media copy.
             replacement = dest / "images.tmp"

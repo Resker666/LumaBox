@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .runner import run_download
 from .limits import DEFAULT_VIDEO_LIMIT_MIB
+from .progress import validate_progress_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -13,10 +14,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--authorized", action="store_true", required=True, help="Confirm that you have permission to download this work")
     parser.add_argument("--output", type=Path, default=Path("Downloaded"))
     parser.add_argument("--headless", action="store_true", help="Run Chromium without a visible window")
+    parser.add_argument("--progress-file", type=Path, help="Private progress snapshot at <output>/.progress.json")
     parser.add_argument("--video-limit-mib", type=int, default=DEFAULT_VIDEO_LIMIT_MIB, help="Video size limit in MiB (1–8192, default 1024)")
     args = parser.parse_args(argv)
+    if args.progress_file is not None:
+        try:
+            args.progress_file = validate_progress_path(args.output, args.progress_file)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+    options = {"video_limit_mib": args.video_limit_mib}
+    if args.progress_file is not None:
+        options["progress_file"] = args.progress_file
     try:
-        result = asyncio.run(run_download(args.input, args.output, args.headless, video_limit_mib=args.video_limit_mib))
+        result = asyncio.run(run_download(args.input, args.output, args.headless, **options))
     except KeyboardInterrupt:
         result = {"status": "failed", "error": "INTERRUPTED"}
     print(json.dumps(result, ensure_ascii=False))

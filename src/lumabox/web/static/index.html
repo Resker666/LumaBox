@@ -44,13 +44,25 @@
       </div>
       <section class="collection" aria-labelledby="collection-heading">
         <div class="collection-heading"><div class="section-kicker"><span class="step-tag">02</span><h2 id="collection-heading">最近的收藏</h2></div><span id="task-count" class="muted small">0 份收藏</span></div>
+        <div class="collection-toolbar">
+          <div class="search-field"><label class="visually-hidden" for="collection-search">搜索收藏</label><input id="collection-search" type="search" maxlength="200" placeholder="搜索标题、作品 ID 或链接" autocomplete="off"></div>
+          <div class="status-field"><label class="visually-hidden" for="collection-status">任务状态</label><select id="collection-status"><option value="all">全部状态</option><option value="pending">待下载</option><option value="running">下载中</option><option value="success">已完成</option><option value="failed">未完成</option><option value="expired">已过期</option></select></div>
+          <button id="clear-failed" class="quiet-button" type="button" disabled>清理失败记录</button>
+        </div>
         <p id="connection-error" class="form-error" role="status" hidden></p>
+        <p id="action-error" class="form-error" role="alert" hidden></p>
         <div id="empty-state" class="empty-state"><span aria-hidden="true">▤</span><h3>光匣里还很安静</h3><p>添加第一条链接，把喜欢的瞬间留下来。</p></div>
         <div id="job-list" class="job-list" aria-label="最近下载任务"></div>
-        <p class="collection-foot">显示最近 30 个任务 · 等待队列最多 10 个 · 收藏长期保留</p>
+        <nav class="collection-pagination" aria-label="收藏分页"><button id="previous-page" class="page-button" type="button" disabled>上一页</button><span id="page-info" class="muted small">第 1 / 1 页</span><button id="next-page" class="page-button" type="button" disabled>下一页</button></nav>
+        <p class="collection-foot">每页 20 个任务 · 等待队列最多 10 个 · 收藏长期保留</p>
       </section>
     </section>
   </main>
+  <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title">
+    <div class="preview-heading"><div><h2 id="preview-title">预览收藏</h2><p id="preview-identity" class="muted small"></p></div><button id="close-preview" class="page-button" type="button" aria-label="关闭预览">关闭 <span aria-hidden="true">×</span></button></div>
+    <div class="preview-media"><video id="preview-video" controls preload="metadata" hidden></video><img id="preview-image" alt="" hidden><p id="preview-error" class="form-error" role="status" hidden></p><p id="preview-loading" class="muted small" role="status" hidden>正在读取本机文件…</p></div>
+    <div id="gallery-navigation" class="gallery-navigation" hidden><button id="previous-image" class="page-button" type="button">上一张</button><span id="image-counter" class="muted small" aria-live="polite"></span><button id="next-image" class="page-button" type="button">下一张</button></div>
+  </dialog>
   <footer class="site-footer"><span>LumaBox · 光匣</span><span>给每个值得留住的瞬间，一个位置。</span></footer>
 </body>
 </html>

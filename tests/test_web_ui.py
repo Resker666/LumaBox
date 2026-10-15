@@ -76,8 +76,8 @@ def test_desktop_direct_use_limits_save_folder_download_and_retry(server, browse
         expect(page.get_by_label("我有权下载此作品")).to_have_count(0)
         page.get_by_label("单视频上限").fill("2048")
         submit(page, '<img src=x onerror="window.injected=true"> 分享 ' + URL)
-        expect(page.get_by_text("下载中", exact=True)).to_be_visible(timeout=10000)
-        expect(page.get_by_text("已完成", exact=True)).to_be_visible(timeout=10000)
+        expect(page.locator("#job-list").get_by_text("下载中", exact=True)).to_be_visible(timeout=10000)
+        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_be_visible(timeout=10000)
         page.get_by_role("button", name="打开文件夹", exact=True).click()
         expect(page.get_by_text("已打开保存文件夹。", exact=True)).to_be_visible()
         assert len(opened) == 1 and opened[0].is_relative_to(worker.config.output_dir)
@@ -94,7 +94,7 @@ def test_desktop_direct_use_limits_save_folder_download_and_retry(server, browse
         expect(page.get_by_text("作品 · 未识别作品", exact=True)).to_be_visible()
         worker.mode = "success"
         page.get_by_role("button", name="一键重试", exact=True).click()
-        expect(page.get_by_text("已完成", exact=True)).to_have_count(2, timeout=10000)
+        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_have_count(2, timeout=10000)
         screenshot(page, "tasks-desktop.png")
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         jobs = page.request.get(url + "/api/jobs").json()["jobs"]
@@ -174,11 +174,11 @@ def test_polling_connection_notice_clears_after_recovery(server, browser):
     context = browser.new_context()
     page = context.new_page()
     try:
-        page.route("**/api/jobs", lambda route: route.abort())
+        page.route("**/api/jobs?*", lambda route: route.abort())
         page.goto(url)
         warning = page.get_by_text("连接暂时中断，正在尝试重新连接…", exact=True)
         expect(warning).to_be_visible(timeout=5000)
-        page.unroute("**/api/jobs")
+        page.unroute("**/api/jobs?*")
         expect(warning).to_be_hidden(timeout=5000)
     finally:
         context.close()

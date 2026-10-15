@@ -69,7 +69,7 @@ class _DownloadGuard:
         self.thread.join()
 
 
-def download_resource(resource, path: Path, headers_for_url, max_bytes: int, cancel=None) -> int:
+def download_resource(resource, path: Path, headers_for_url, max_bytes: int, cancel=None, *, progress=None) -> int:
     deadline = time.monotonic() + TOTAL_TIMEOUT
     guard = _DownloadGuard(deadline, cancel)
     url = resource.url
@@ -131,11 +131,16 @@ def download_resource(resource, path: Path, headers_for_url, max_bytes: int, can
                         remaining()
                         if not block:
                             break
-                        total += len(block)
-                        if total > max_bytes:
+                        if total + len(block) > max_bytes:
                             raise LumaBoxError("SIZE_LIMIT", "Media exceeds the file size limit",
-                                               diagnostics={"limit_bytes": max_bytes, "at_least_bytes": total})
-                        output.write(block)
+                                               diagnostics={"limit_bytes": max_bytes, "at_least_bytes": total + len(block)})
+                        total += output.write(block)
+                        if progress is not None:
+                            output.flush()
+                            try:
+                                progress(total, expected_length)
+                            except Exception:
+                                pass  # Progress consumers cannot interrupt the media operation.
                 if total == 0 or (expected_length is not None and total != expected_length):
                     raise LumaBoxError("DOWNLOAD_FAILED", "The media response was empty or incomplete")
                 return total

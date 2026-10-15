@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 from ..errors import LumaBoxError
 from ..urls import parse_input
 from ..limits import DEFAULT_VIDEO_LIMIT_MIB, video_limit_bytes
+from ..metadata import normalize_title
+from ..progress import sanitize_snapshot
 from .config import WebConfig, WebError, is_link
 
 ID = re.compile(r"[0-9a-f]{32}")
@@ -49,7 +51,9 @@ class JobStore:
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
             for name, definition in (("video_limit_mib", "INTEGER NOT NULL DEFAULT 100"),
-                                     ("error_detail", "TEXT"), ("retry_of", "TEXT")):
+                                     ("error_detail", "TEXT"), ("retry_of", "TEXT"),
+                                     ("title", "TEXT"), ("progress", "TEXT NOT NULL DEFAULT '{}'"),
+                                     ("started_at", "REAL"), ("hidden_at", "REAL")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
             previous = db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()
@@ -102,23 +106,28 @@ class JobStore:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM jobs WHERE status='running'").fetchone():
                 return None
-            row = db.execute("SELECT * FROM jobs WHERE status='pending' ORDER BY created_at,rowid LIMIT 1").fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE status='pending' AND hidden_at IS NULL ORDER BY created_at,rowid LIMIT 1").fetchone()
             if row is None:
                 return None
-            db.execute("UPDATE jobs SET status='running',updated_at=? WHERE id=?", (time.time(), row["id"]))
-            return dict(row)
+            now = time.time()
+            db.execute("UPDATE jobs SET status='running',updated_at=?,started_at=? WHERE id=?", (now, now, row["id"]))
+            return {**dict(row), "status": "running", "started_at": now}
 
     def get(self, job_id: str) -> dict:
         if not ID.fullmatch(job_id):
             raise WebError("NOT_FOUND", 404)
         with self.connection() as db:
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
             if row is None:
                 raise WebError("NOT_FOUND", 404)
             result = {key: row[key] for key in ("id", "work_id", "kind", "status", "created_at", "updated_at",
                                                "error", "expected_count", "actual_count")}
             result.update(source_url=row["url"], video_limit_mib=row["video_limit_mib"],
-                          error_detail=json.loads(row["error_detail"] or "{}"), output_directory=None, files=[])
+                          error_detail=json.loads(row["error_detail"] or "{}"), output_directory=None, files=[],
+                          title=normalize_title(row["title"]), progress=json.loads(row["progress"] or "{}"))
+            if row["started_at"] is not None:
+                end = time.time() if row["status"] == "running" else row["updated_at"]
+                result["progress"]["elapsed_seconds"] = max(0, int(end - row["started_at"]))
             if row["status"] == "success":
                 result["files"] = [self.public_file(f) for f in db.execute("SELECT * FROM files WHERE job_id=? ORDER BY rowid", (job_id,))]
                 first = db.execute("SELECT relative_path FROM files WHERE job_id=? ORDER BY rowid LIMIT 1", (job_id,)).fetchone()
@@ -131,8 +140,69 @@ class JobStore:
 
     def list(self) -> list[dict]:
         with self.connection() as db:
-            ids = [r[0] for r in db.execute("SELECT id FROM jobs ORDER BY created_at DESC,rowid DESC LIMIT 30")]
+            ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE hidden_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 30")]
         return [self.get(job_id) for job_id in ids]
+
+    def search(self, q="", status="all", page=1, page_size=20) -> dict:
+        if (not isinstance(q, str) or len(q) > 200 or
+                status not in ("all", "pending", "running", "success", "failed", "expired") or
+                type(page) is not int or not 1 <= page <= 1_000_000 or
+                type(page_size) is not int or not 1 <= page_size <= 100):
+            raise WebError("INVALID_REQUEST")
+        clauses, parameters = ["hidden_at IS NULL"], []
+        if status != "all":
+            clauses.append("status=?")
+            parameters.append(status)
+        if q.strip():
+            pattern = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            clauses.append("(COALESCE(title,'') LIKE ? ESCAPE '\\' OR work_id LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')")
+            parameters.extend([pattern] * 3)
+        where = " AND ".join(clauses)
+        with self.lock:
+            with self.connection() as db:
+                total = db.execute(f"SELECT count(*) FROM jobs WHERE {where}", parameters).fetchone()[0]
+                ids = [r[0] for r in db.execute(f"SELECT id FROM jobs WHERE {where} ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?",
+                       [*parameters, page_size, (page - 1) * page_size])]
+            jobs = [self.get(job_id) for job_id in ids]
+        return {"jobs": jobs, "total": total, "page": page, "page_size": page_size}
+
+    def remove(self, job_id: str) -> int:
+        with self.lock:
+            job = self.get(job_id)
+            if job["status"] in ("pending", "running"):
+                raise WebError("JOB_ACTIVE", 409)
+            with self.connection() as db:
+                return db.execute("UPDATE jobs SET hidden_at=? WHERE id=? AND hidden_at IS NULL", (time.time(), job_id)).rowcount
+
+    def clear_failed(self) -> int:
+        with self.connection() as db:
+            return db.execute("UPDATE jobs SET hidden_at=? WHERE status='failed' AND hidden_at IS NULL", (time.time(),)).rowcount
+
+    def update_progress(self, job_id: str, snapshot: dict) -> bool:
+        if not isinstance(job_id, str) or not ID.fullmatch(job_id) or not isinstance(snapshot, dict):
+            return False
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND status='running' AND hidden_at IS NULL", (job_id,)).fetchone()
+            if row is None:
+                return False
+            previous = json.loads(row["progress"] or "{}")
+            progress = sanitize_snapshot({**previous, **snapshot})
+            if progress is None:
+                return False
+            work_id, kind = progress["work_id"], progress["kind"]
+            if (work_id is not None and kind is None) or (kind is not None and work_id is None):
+                return False
+            if row["work_id"] and work_id and (row["work_id"] != work_id or row["kind"] != kind):
+                return False
+            if (progress["bytes_received"] < previous.get("bytes_received", 0) or
+                    progress["completed_count"] < previous.get("completed_count", 0) or
+                    (previous.get("expected_count", 0) and progress["expected_count"] != previous["expected_count"]) or
+                    (previous.get("stage") == "publication" and progress["stage"] != "publication")):
+                return False
+            title = normalize_title(progress["title"]) if work_id is not None else None
+            db.execute("UPDATE jobs SET progress=?,work_id=COALESCE(work_id,?),kind=COALESCE(kind,?),title=COALESCE(?,title),updated_at=? WHERE id=?",
+                       (json.dumps(progress, ensure_ascii=False), work_id, kind, title, time.time(), job_id))
+        return True
 
     @staticmethod
     def public_file(file: dict) -> dict:
@@ -140,14 +210,16 @@ class JobStore:
 
     def finish(self, job_id: str, result: dict, files: list[dict]):
         with self.connection() as db:
-            if db.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()[0] != "running":
+            row = db.execute("SELECT status,work_id,kind FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
+            if (row is None or row["status"] != "running" or
+                    (row["work_id"] and (row["work_id"] != result["work_id"] or row["kind"] != result["kind"]))):
                 raise WebError("VERIFY_FAILED")
             for file in files:
                 db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?)", (
                     uuid.uuid4().hex, job_id, file["relative_path"], file["name"], file["bytes"], file["sha256"],
                     file["mime"], file.get("width"), file.get("height"), file.get("duration")))
-            db.execute("UPDATE jobs SET status='success',work_id=?,kind=?,expected_count=?,actual_count=?,updated_at=? WHERE id=?",
-                       (result["work_id"], result["kind"], result["expected_count"], result["actual_count"], time.time(), job_id))
+            db.execute("UPDATE jobs SET status='success',work_id=?,kind=?,title=COALESCE(?,title),expected_count=?,actual_count=?,updated_at=? WHERE id=?",
+                       (result["work_id"], result["kind"], normalize_title(result.get("title")), result["expected_count"], result["actual_count"], time.time(), job_id))
 
     def fail(self, job_id: str, error: str, result: dict | None = None):
         result = result if isinstance(result, dict) else {}
@@ -156,11 +228,13 @@ class JobStore:
         detail = {key: diagnostics[key] for key in ("limit_bytes", "actual_bytes", "at_least_bytes")
                   if type(diagnostics.get(key)) is int and 0 <= diagnostics[key] < 2**63}
         with self.connection() as db:
-            row = db.execute("SELECT work_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = db.execute("SELECT work_id,kind,status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None or row["status"] not in ("pending", "running"):
+                return
             work_id, kind = result.get("work_id"), result.get("kind")
             if (isinstance(work_id, str) and re.fullmatch(r"\d{15,20}", work_id) and kind in ("video", "gallery") and
-                    row and (row[0] is None or row[0] == work_id)):
-                db.execute("UPDATE jobs SET work_id=?,kind=? WHERE id=?", (work_id, kind, job_id))
+                    row and (row["work_id"] is None or (row["work_id"] == work_id and row["kind"] == kind))):
+                db.execute("UPDATE jobs SET work_id=?,kind=?,title=COALESCE(?,title) WHERE id=?", (work_id, kind, normalize_title(result.get("title")), job_id))
             db.execute("UPDATE jobs SET status='failed',error=?,error_detail=?,updated_at=? WHERE id=? AND status IN ('pending','running')",
                        (error, json.dumps(detail), time.time(), job_id))
 
@@ -175,7 +249,7 @@ class JobStore:
         if not ID.fullmatch(file_id):
             raise WebError("NOT_FOUND", 404)
         with self.connection() as db:
-            row = db.execute("SELECT files.* FROM files JOIN jobs ON jobs.id=files.job_id WHERE files.id=? AND jobs.status='success'", (file_id,)).fetchone()
+            row = db.execute("SELECT files.* FROM files JOIN jobs ON jobs.id=files.job_id WHERE files.id=? AND jobs.status='success' AND jobs.hidden_at IS NULL", (file_id,)).fetchone()
             if row is None:
                 raise WebError("NOT_FOUND", 404)
             return dict(row)
