@@ -7,8 +7,10 @@ from starlette.background import BackgroundTask
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
+from .. import __version__
 from .config import WebConfig, WebError
 from .folders import open_folder
+from .media import preview_response
 from .store import JobStore
 from .worker import JobWorker
 
@@ -19,6 +21,7 @@ MESSAGES = {
     "QUEUE_FULL": "等待队列已满，请稍后再试。", "ALREADY_QUEUED": "此任务已有重试正在等待或运行。",
     "NOT_RETRYABLE": "此任务当前无需重试。", "FOLDER_OPEN_UNAVAILABLE": "暂时无法打开文件夹，可按保存位置查找或另存文件。",
     "NOT_FOUND": "任务或文件不存在，文件可能已过期。", "SERVER_ERROR": "暂时无法完成请求，请稍后重试。",
+    "JOB_ACTIVE": "任务仍在等待或运行，请完成后再移除记录。", "PREVIEW_UNAVAILABLE": "此文件暂不支持预览。",
 }
 
 
@@ -43,7 +46,7 @@ class LocalBoundary:
                 message["headers"] += [
                     (b"cache-control", b"no-store"), (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"no-referrer"), (b"x-frame-options", b"DENY"),
-                    (b"content-security-policy", b"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+                    (b"content-security-policy", b"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
                 ]
             await send(message)
 
@@ -133,7 +136,9 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
 
     @app.get("/api/session")
     def get_session():
-        return {"csrf": csrf, "video_limit_mib": config.video_limit_mib, "max_video_limit_mib": 8192,
+        return {"csrf": csrf, "application": "lumabox", "version": __version__,
+                "data_directory": str(config.data_dir),
+                "video_limit_mib": config.video_limit_mib, "max_video_limit_mib": 8192,
                 "output_directory": str(config.output_dir), "pending_limit": 10, "persistent": True,
                 "image_limit_mib": 20, "gallery_limit_mib": 200, "gallery_count_limit": 50}
 
@@ -167,11 +172,34 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
 
     @app.get("/api/jobs")
     def list_jobs(request: Request):
-        return {"jobs": store.list()}
+        query = request.query_params
+        try:
+            page, page_size = int(query.get("page", "1")), int(query.get("page_size", "20"))
+        except ValueError:
+            raise WebError("INVALID_REQUEST") from None
+        return store.search(query.get("q", ""), query.get("status", "all"), page, page_size)
+
+    @app.post("/api/jobs/clear-failed")
+    async def clear_failed(request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        return {"removed": store.clear_failed()}
+
+    @app.post("/api/jobs/{job_id}/remove")
+    async def remove_record(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        return {"removed": store.remove(job_id)}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str, request: Request):
         return store.get(job_id)
+
+    @app.api_route("/api/files/{file_id}/preview", methods=["GET", "HEAD"])
+    def preview(file_id: str, request: Request):
+        return preview_response(store, file_id, request)
 
     @app.get("/api/files/{file_id}")
     def download(file_id: str, request: Request):

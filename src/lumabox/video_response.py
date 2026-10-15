@@ -4,6 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .errors import LumaBoxError
 from .models import MediaResource, Work
+from .metadata import normalize_title
 from .urls import https_parts, validate_media_url
 
 DETAIL_BODY_LIMIT = 2 * 1024 * 1024
@@ -47,7 +48,7 @@ def extract_detail_video(data: object, expected_id: str) -> Work | None:
             validate_media_url(url)
             if urlsplit(url).fragment:
                 raise LumaBoxError("UNSUPPORTED_MEDIA", "A complete media address is required")
-            return Work(expected_id, "video", (MediaResource(url, 1),))
+            return Work(expected_id, "video", (MediaResource(url, 1),), normalize_title(item.get("desc")))
         except LumaBoxError as exc:
             rejected = exc
     if rejected:

@@ -51,7 +51,7 @@ def test_local_page_and_history_need_no_password(client, app):
     assert response.status_code == 200
     assert response.json()["video_limit_mib"] == 1024
     assert Path(response.json()["output_directory"]) == app.state.store.config.output_dir
-    assert client.get("/api/jobs").json() == {"jobs": []}
+    assert client.get("/api/jobs").json() == {"jobs": [], "total": 0, "page": 1, "page_size": 20}
 
 
 def test_security_headers_still_apply_without_login(client):

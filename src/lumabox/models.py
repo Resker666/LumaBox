@@ -19,6 +19,7 @@ class Work:
     work_id: str
     kind: str
     resources: tuple[MediaResource, ...]
+    title: str | None = None
 
 
 @dataclass(frozen=True)

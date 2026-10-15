@@ -12,6 +12,8 @@ from pathlib import Path
 from .browser import BrowserSession
 from .errors import LumaBoxError
 from .limits import DEFAULT_VIDEO_LIMIT_MIB, IMAGE_LIMIT, GALLERY_LIMIT, video_limit_bytes
+from .metadata import normalize_title
+from .progress import ProgressFile, validate_progress_path
 from .transfer import download_resource
 from .urls import parse_input
 from .verify import verify_file
@@ -25,8 +27,8 @@ def make_zip(directory: Path, work_id: str, names: list[str]):
             archive.write(directory / name, arcname=name)
 
 
-async def _blocking(fn, *args, cancel):
-    worker = asyncio.create_task(asyncio.to_thread(fn, *args))
+async def _blocking(fn, *args, cancel, **kwargs):
+    worker = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
@@ -45,7 +47,8 @@ def _write_report(path: Path, result: dict):
         file.write("\n")
 
 
-async def run_download(text: str, output: Path, headless: bool = False, *, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB) -> dict:
+async def run_download(text: str, output: Path, headless: bool = False, *, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB,
+                       progress_file: Path | None = None) -> dict:
     run_id = uuid.uuid4().hex
     root = output.resolve()
     temporary = None
@@ -53,12 +56,18 @@ async def run_download(text: str, output: Path, headless: bool = False, *, video
     stage = "input"
     failure_diagnostics = {}
     cancel = threading.Event()
+    progress = None
     result = {"run_id": run_id, "date": datetime.now(timezone.utc).isoformat(), "status": "failed",
-              "work_id": None, "kind": None, "metadata_parsed": False, "expected_count": 0,
+              "work_id": None, "kind": None, "title": None, "metadata_parsed": False, "expected_count": 0,
               "actual_count": 0, "files": [], "bytes": 0, "checks": {"full_decode": False},
               "headless": headless, "http_status": None, "output_directory": None}
     try:
         video_limit = video_limit_bytes(video_limit_mib)
+        if progress_file is not None:
+            try:
+                progress = ProgressFile(validate_progress_path(root, progress_file))
+            except ValueError:
+                raise LumaBoxError("INVALID_INPUT", "Progress must use the output directory's .progress.json") from None
         result["limits"] = {"video_bytes": video_limit, "image_bytes": IMAGE_LIMIT, "gallery_bytes": GALLERY_LIMIT}
         link = parse_input(text)
         result.update(work_id=link.work_id, kind=link.kind)
@@ -66,10 +75,16 @@ async def run_download(text: str, output: Path, headless: bool = False, *, video
         root.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=f".partial-{run_id}-", dir=root))
         stage = "browser_start"
+        if progress:
+            progress.emit(stage=stage, work_id=link.work_id, kind=link.kind)
         async with BrowserSession(headless=headless) as session:
             stage = "browser_load"
+            if progress:
+                progress.emit(stage=stage)
             work = await session.load(link)
-            result.update(work_id=work.work_id, kind=work.kind, metadata_parsed=True, expected_count=len(work.resources))
+            result.update(work_id=work.work_id, kind=work.kind, title=normalize_title(work.title), metadata_parsed=True, expected_count=len(work.resources))
+            if progress:
+                progress.emit(work_id=work.work_id, kind=work.kind, title=result["title"], expected_count=len(work.resources))
             loop = asyncio.get_running_loop()
 
             def headers(url):
@@ -89,17 +104,30 @@ async def run_download(text: str, output: Path, headless: bool = False, *, video
                 if limit <= 0:
                     raise LumaBoxError("SIZE_LIMIT", "Gallery exceeds the total size limit", diagnostics={"limit_bytes": GALLERY_LIMIT})
                 stage = "media_transfer"
-                count = await _blocking(download_resource, resource, path, headers, limit, cancel, cancel=cancel)
+                transfer_options = {}
+                if progress:
+                    base = result["bytes"]
+                    progress.emit(stage=stage, resource_index=resource.order, completed_count=len(result["files"]))
+                    def received(count, total):
+                        progress.emit(bytes_received=base + count, bytes_total=total if work.kind == "video" else None)
+                    transfer_options["progress"] = received
+                count = await _blocking(download_resource, resource, path, headers, limit, cancel, cancel=cancel, **transfer_options)
                 if count > limit:
                     raise LumaBoxError("SIZE_LIMIT", "Media exceeds the size limit", diagnostics={"limit_bytes": limit, "actual_bytes": count})
                 stage = "media_verification"
+                if progress:
+                    progress.emit(stage=stage, bytes_received=result["bytes"] + count)
                 verified = await _blocking(verify_file, path, work.kind, cancel=cancel)
                 if verified.name != path.name:
                     path.rename(temporary / verified.name)
                 result["files"].append(asdict(verified))
                 result["bytes"] += verified.bytes
+                if progress:
+                    progress.emit(completed_count=len(result["files"]))
         result["http_status"] = session.http_status
         stage = "publication"
+        if progress:
+            progress.emit(stage=stage, bytes_received=result["bytes"], completed_count=len(result["files"]), resource_index=None)
         destination = root / f"{work.work_id}-{run_id}"
         result.update(status="success", actual_count=len(result["files"]), output_directory=str(destination),
                       checks={"full_decode": True}, report_path=str(destination / "report.json"))

@@ -2,6 +2,7 @@ import re
 
 from .errors import LumaBoxError
 from .models import Work, MediaResource
+from .metadata import normalize_title
 from .urls import https_parts, validate_media_url
 
 # Based on observed Douyin detail DOM on 2026-10-12/13. No application state is read.
@@ -41,8 +42,17 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
  const players = root ? Array.from(root.querySelectorAll('.basePlayerContainer')) : [];
  const player = players.length === 1 ? players[0] : null;
  const out = {work_id: candidate?.id || null, identity_source: candidate?.source || null,
-   kind, scope_confirmed: !!player, count: 0, resources: [], text: (document.body?.innerText || '').slice(0, 20000)};
+   kind, scope_confirmed: !!player, count: 0, resources: [], title: null, text: (document.body?.innerText || '').slice(0, 20000)};
  if (!player) return out;
+ // Read caption nodes only inside the region whose identity was established.
+ // A dedicated page's caption may be beside the player in the same main.
+ try {
+   const captionRoot = candidate.source === 'feed' ? root.closest(feedSelector) : root.closest(mainSelector);
+   const captions = Array.from(captionRoot?.querySelectorAll('[data-e2e="video-desc"], [data-e2e="note-desc"]') || [])
+     .filter(visible).filter(e => !e.closest('.detailrelatedVideoCard') &&
+       (!e.closest(feedSelector) || e.closest(feedSelector).getAttribute('data-e2e-vid') === work_id));
+   if (captions.length === 1) out.title = (captions[0].innerText || '').slice(0, 3000);
+ } catch (_) { /* A missing caption never prevents media extraction. */ }
  if (kind === 'video') {
    const videos = Array.from(player.querySelectorAll('video'));
    if (videos.length === 1) {out.count = 1; out.resources = [{url: videos[0].currentSrc || videos[0].src, order: 1, role: 'video'}];}
@@ -124,4 +134,4 @@ def extract_work(snapshot: dict, expected_id: str) -> Work:
         resources.append(MediaResource(url, entry["order"]))
     if has_placeholder:
         raise LumaBoxError("UNSUPPORTED_MEDIA", "Gallery images are still showing the site's default placeholder")
-    return Work(expected_id, kind, tuple(resources))
+    return Work(expected_id, kind, tuple(resources), normalize_title(snapshot.get("title")))

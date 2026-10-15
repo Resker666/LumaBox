@@ -62,6 +62,25 @@ def test_streams_real_body_across_redirect_without_cookie_leak(server, tmp_path)
     assert cookies == [("/start", "only-p3"), ("/end", None)]
 
 
+@pytest.mark.parametrize("length", [True, False])
+def test_progress_counts_actual_disk_writes_and_only_reports_known_length(server, tmp_path, length):
+    payload = b"a" * 70000
+    headers = {"Content-Type": "video/mp4"}
+    if length:
+        headers["Content-Length"] = str(len(payload))
+    server[0]["/start"] = (200, headers, payload)
+    target = tmp_path / "out.mp4"
+    observations = []
+    def progress(received, total):
+        # Read the actual file at the callback boundary, not a guessed timer.
+        observations.append((received, total, target.stat().st_size))
+    assert transfer.download_resource(MediaResource("https://p3.douyinpic.com/start", 1), target,
+        lambda url: {}, 100000, progress=progress) == 70000
+    assert observations and observations[-1] == (70000, 70000 if length else None, 70000)
+    assert all(received == size and received <= 70000 for received, _, size in observations)
+    assert [item[0] for item in observations] == sorted(item[0] for item in observations)
+
+
 @pytest.mark.parametrize("status,headers,body,code", [
     (403, {}, b"", "BLOCKED"), (401, {}, b"", "AUTH_REQUIRED"), (429, {}, b"", "RATE_LIMITED"),
     (302, {"Location": "https://127.0.0.1/private"}, b"", "UNSAFE_TARGET"),

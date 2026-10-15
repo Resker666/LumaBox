@@ -4,6 +4,7 @@ import json
 import re
 import time
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright, Error as PlaywrightError
@@ -11,6 +12,7 @@ from playwright.async_api import async_playwright, Error as PlaywrightError
 from .errors import LumaBoxError, check_status
 from .extract import DOM_SNAPSHOT, detect_access, extract_work
 from .net import resolve_public
+from .metadata import normalize_title
 from .proxy import PublicProxy
 from .urls import validate_page_url, page_identity, validate_media_url, MEDIA_HOSTS
 from .video_response import DETAIL_BODY_LIMIT, detail_request_id, extract_detail_video
@@ -315,7 +317,10 @@ class BrowserSession:
                 has_media = snapshot.get("scope_confirmed") and any(r.get("url") for r in snapshot["resources"])
                 detect_access(snapshot["text"], has_media)
                 try:
-                    return extract_work(snapshot, work_id)
+                    work = extract_work(snapshot, work_id)
+                    if not work.title and self.detail_work and self.detail_work.work_id == work_id:
+                        work = replace(work, title=self.detail_work.title)
+                    return work
                 except LumaBoxError as exc:
                     if exc.code != "UNSUPPORTED_MEDIA":
                         self.diagnostics["reason"] = exc.message
@@ -328,7 +333,7 @@ class BrowserSession:
                         if self.detail_work and self.detail_work.work_id == work_id:
                             self.diagnostics["resource_source"] = "normal_detail_response"
                             self.diagnostics["resource_hosts"] = sorted({_diagnostic_host(r.url) for r in self.detail_work.resources})
-                            return self.detail_work
+                            return replace(self.detail_work, title=normalize_title(snapshot.get("title")) or self.detail_work.title)
             else:
                 text = await self.page.locator("body").inner_text(timeout=1000)
                 detect_access(text[:20000], False)
