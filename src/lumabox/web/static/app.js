@@ -1,6 +1,6 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const labels = { pending: "待下载", running: "下载中", success: "已完成", failed: "未完成", expired: "已过期" };
+const labels = { pending: "待下载", running: "下载中", cancelling: "正在取消", cancelled: "已取消", success: "已完成", failed: "未完成", expired: "已过期" };
 const stages = { browser_start: "启动浏览器", browser_load: "读取作品", media_transfer: "下载媒体", media_verification: "检查文件", publication: "整理收藏" };
 const failures = {
   AUTH_REQUIRED: "此作品需要登录后访问，暂时无法下载。",
@@ -18,6 +18,17 @@ const failures = {
   DEPENDENCY_MISSING: "下载组件尚未安装完整，请检查安装说明。",
   INTERRUPTED: "任务已中断，可以重新提交。",
   DOWNLOAD_FAILED: "下载未完成，请检查网络后重试。"
+};
+const networkFailures = {
+  DNS_NON_PUBLIC: "DNS 返回虚拟或非公网地址，当前地址检查已停止连接。请检查 DNS 或代理设置后重试。",
+  DNS_LOOKUP_FAILED: "DNS 解析失败，无法取得网站地址。请检查网络和 DNS 设置后重试。",
+  DNS_TIMEOUT: "DNS 解析超时，请检查网络和 DNS 设置后重试。",
+  CONNECTION_REFUSED: "连接被拒绝，请检查网络或代理设置后重试。",
+  CONNECTION_RESET: "连接被重置，下载连接已中断，请稍后重试。",
+  CONNECTION_TIMEOUT: "连接超时，未能及时取得响应，请检查网络后重试。",
+  CONNECTION_UNREACHABLE: "目标网络不可达，请检查网络或代理路由后重试。",
+  TLS_ERROR: "TLS 安全连接失败，请检查系统时间、证书或代理设置后重试。",
+  CONNECTION_FAILED: "网络连接失败，请检查网络或代理设置后重试。"
 };
 const history = { q: "", status: "all", page: 1, page_size: 20 };
 const cards = new Map();
@@ -74,6 +85,7 @@ function updateLimit() {
 }
 
 function failureText(job) {
+  if (networkFailures[job.error_detail?.network_reason]) return networkFailures[job.error_detail.network_reason];
   if (job.error !== "SIZE_LIMIT") return failures[job.error] || failures.DOWNLOAD_FAILED;
   const detail = job.error_detail || {};
   const limit = detail.limit_bytes || (job.video_limit_mib || 100) * 1024 ** 2;
@@ -150,6 +162,8 @@ function buildCard(job) {
   let detail = "";
   if (job.status === "running") detail = progressText(job);
   if (job.status === "pending") detail = "已加入队列，稍后开始。";
+  if (job.status === "cancelling") detail = "正在停止下载并清理未完成文件，请稍候。";
+  if (job.status === "cancelled") detail = "下载已取消。需要时可以重新下载。";
   if (job.status === "expired") detail = "旧版临时文件已过期，可以重新保存此作品。";
   if (job.status === "failed") detail = failureText(job);
   if (job.status === "success") {
@@ -157,6 +171,11 @@ function buildCard(job) {
     detail = `${gallery ? `${job.actual_count} 张图片` : "完整视频"} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · 已保存到本机`;
   }
   if (detail) body.append(element("p", `job-detail ${job.status}`, detail));
+  if (job.status === "failed" && networkFailures[job.error_detail?.network_reason]) {
+    const locations = { dns_resolution: "域名解析", page_navigation: "读取作品页面", media_transfer: "下载媒体" };
+    const location = [locations[job.error_detail.stage], job.error_detail.host].filter(Boolean).join(" · ");
+    if (location) body.append(element("p", "job-meta", `失败位置：${location}`));
+  }
   const snapshot = job.progress || {};
   if (job.status === "running" && job.kind !== "gallery" && snapshot.stage === "media_transfer" && snapshot.bytes_total > 0 && Number.isFinite(snapshot.bytes_received)) {
     const meter = element("progress", "job-progress-meter");
@@ -166,6 +185,10 @@ function buildCard(job) {
     body.append(meter);
   }
   const controls = element("div", "job-controls");
+  if (["pending", "running"].includes(job.status)) controls.append(action("取消下载", "cancel-button", async () => {
+    await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, {});
+    await refreshJobs();
+  }, "cancel"));
   if (job.status === "success") {
     if (job.output_directory) body.append(element("p", "job-path", `保存位置：${job.output_directory}`));
     const media = job.files.filter((file) => ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime));
@@ -191,11 +214,11 @@ function buildCard(job) {
     extra.append(links);
     controls.append(extra);
   }
-  if (job.status === "failed" || job.status === "expired") controls.append(action("一键重试", "retry-button", async () => {
+  if (["failed", "expired", "cancelled"].includes(job.status)) controls.append(action(job.status === "cancelled" ? "重新下载" : "一键重试", "retry-button", async () => {
     await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { video_limit_mib: selectedLimit() });
     await addJob();
   }, "retry"));
-  if (["success", "failed", "expired"].includes(job.status)) controls.append(action("移除记录", "remove-button", async () => {
+  if (["success", "failed", "expired", "cancelled"].includes(job.status)) controls.append(action("移除记录", "remove-button", async () => {
     if (!window.confirm("移除这条收藏记录？已保存的文件会保留在电脑上。")) return;
     await api(`/api/jobs/${encodeURIComponent(job.id)}/remove`, {});
     await refreshJobs();

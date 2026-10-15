@@ -126,7 +126,7 @@ def test_idle_timeout_removes_partial(server, tmp_path, monkeypatch):
         download(target)
     assert not target.exists()
     assert failure.value.diagnostics == {"resource_order": 1, "host": "p3.douyinpic.com",
-                                         "http_status": 200, "content_type": "image/jpeg"}
+                                         "http_status": 200, "content_type": "image/jpeg", "network_reason": "CONNECTION_TIMEOUT"}
 
 
 def test_total_deadline_stops_trickle_download(server, tmp_path, monkeypatch):
@@ -202,6 +202,6 @@ def test_cancel_interrupts_trickled_headers(server, tmp_path):
             transfer.download_resource(MediaResource("https://p3.douyinpic.com/start", 1), target, lambda url: {}, 100, cancel)
         assert time.monotonic() - start < 0.4
         assert not target.exists()
-        assert failure.value.diagnostics == {"resource_order": 1}
+        assert failure.value.diagnostics == {"resource_order": 1, "host": "p3.douyinpic.com"}
     finally:
         timer.cancel()

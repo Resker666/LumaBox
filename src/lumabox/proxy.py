@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from .errors import LumaBoxError
 from .net import resolve_public
+from .diagnostics import network_reason, public_diagnostics
 
 
 async def _dial(ip: str):
@@ -49,7 +50,11 @@ class PublicProxy:
             host = parts.hostname
             if method != "CONNECT" or version not in ("HTTP/1.0", "HTTP/1.1") or not host or parts.port != 443 or parts.username is not None or parts.path or parts.query or parts.fragment or "%" in authority or "\\" in authority:
                 raise LumaBoxError("UNSAFE_TARGET", "Invalid CONNECT target")
-            addresses = await asyncio.wait_for(asyncio.to_thread(resolve_public, host), 15)
+            try:
+                addresses = await asyncio.wait_for(asyncio.to_thread(resolve_public, host), 15)
+            except TimeoutError:
+                raise LumaBoxError("RESOURCE_TIMEOUT", "DNS resolution exceeded its time limit", diagnostics={
+                    "stage": "dns_resolution", "host": host, "network_reason": "DNS_TIMEOUT"}) from None
             remote_reader, upstream = await _dial(addresses[0])
             self.connections.add(upstream)
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -61,13 +66,17 @@ class PublicProxy:
                     await destination.drain()
 
             pumps = [asyncio.create_task(pump(reader, upstream)), asyncio.create_task(pump(remote_reader, writer))]
-            await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            completed, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            for pump_task in completed:
+                pump_task.result()  # Preserve network failures before gathering tasks during teardown.
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             code = exc.code if isinstance(exc, LumaBoxError) else "DOWNLOAD_FAILED"
             if len(self.failures) < 100:
-                self.failures.append({"host": host, "code": code})
+                detail = public_diagnostics(exc.diagnostics) if isinstance(exc, LumaBoxError) else {
+                    "network_reason": network_reason(exc) or "CONNECTION_FAILED"}
+                self.failures.append({**detail, "host": host, "code": code})
             if upstream is None:
                 writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 try:

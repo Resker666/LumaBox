@@ -20,6 +20,7 @@ MESSAGES = {
     "JSON_REQUIRED": "请提交 JSON 格式的请求。", "INVALID_INPUT": "请粘贴一条抖音视频或图集链接。",
     "QUEUE_FULL": "等待队列已满，请稍后再试。", "ALREADY_QUEUED": "此任务已有重试正在等待或运行。",
     "NOT_RETRYABLE": "此任务当前无需重试。", "FOLDER_OPEN_UNAVAILABLE": "暂时无法打开文件夹，可按保存位置查找或另存文件。",
+    "NOT_CANCELLABLE": "任务已经结束，无需取消。请刷新查看最新状态。",
     "NOT_FOUND": "任务或文件不存在，文件可能已过期。", "SERVER_ERROR": "暂时无法完成请求，请稍后重试。",
     "JOB_ACTIVE": "任务仍在等待或运行，请完成后再移除记录。", "PREVIEW_UNAVAILABLE": "此文件暂不支持预览。",
 }
@@ -161,6 +162,13 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
         if set(body) - {"video_limit_mib"}:
             raise WebError("INVALID_REQUEST")
         return store.retry(job_id, body.get("video_limit_mib", config.video_limit_mib))
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    async def cancel_job(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        return store.cancel(job_id)
 
     @app.post("/api/jobs/{job_id}/open-folder")
     async def show_folder(job_id: str, request: Request):
