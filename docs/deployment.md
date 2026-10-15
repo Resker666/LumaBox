@@ -2,7 +2,7 @@
 
 使用 Ubuntu 24.04、Python 3.12、FFmpeg 和 Chromium。有界面 Chromium 在 Xvfb 内运行，不提供远程桌面。网页使用 `--remote`：文件先完整下载并检查后保存在服务器 Output，用户通过网页预览、下载视频或图集 ZIP。
 
-2026-10-15 状态：后台常驻服务及真实下载验收通过，公网域名仍返回阿里云备案拦截，HTTPS 证书校验返回 403，尚未上线公网。详见[本次部署验收](validation/2026-10-15-cloud-deploy.md)。Nginx 入口模板及续期钩子尚未启用。
+2026-10-15 状态：后台常驻服务及真实下载验收通过。用户已提交备案，正在等待审核；域名 HTTPS 尚未上线。随后按用户明确要求启用带独立密码的临时 IP 体验入口，下载、预览和图集 ZIP 已通过公网验证。详见[本次部署验收](validation/2026-10-15-cloud-deploy.md)。域名入口模板及续期钩子尚未启用。
 
 ## 目录与运行方式
 
@@ -39,6 +39,16 @@ systemctl reload nginx
 Nginx 先校验来自浏览器的公网 Origin，再将 Host / Origin 翻译为本机服务接受的值；原有 CSRF、跨站请求和请求体上限继续生效。不把未经认证的外部请求转发到应用，不开放 8765 公网端口。
 
 证书申请成功后安装 [续期钩子](../deploy/lumabox-renew-hook.sh) 到 `/etc/letsencrypt/renewal-hooks/deploy/` 并赋予可执行权限，确认 certbot 定时器和续期演练。钩子只处理本站证书，使用实际配置测试成功才重载 Nginx。
+
+## 临时 IP 体验入口
+
+用户申请备案后要求先通过服务器 IP 体验，使用 [IP 入口配置](../deploy/lumabox-ip-preview.conf)，仅匹配 IP Host，独立于原有 Ghost Chat 站点。配置包含在当前生效的 `/etc/nginx/ghost-chat.conf` 中；变更前已在 WebData/backups 备份，配置测试成功才重载。
+
+当前应用使用 `/etc/systemd/system/lumabox.service.d/private-preview.conf` 覆盖启动命令，将回环端口临时设为 18765；数据目录、输出目录和 dev 用户保持不变。Nginx 对 IP 入口先校验公网 Origin，再翻译到该回环端口。公网仅使用已有 80 端口，没有开放应用端口。
+
+认证账号为 lumabox，使用独立随机密码。服务器凭据位于 `WebData/ip-preview-access.json`，密码哈希位于 `/etc/nginx/lumabox-preview.htpasswd`（root:www-data 0640）。凭据没有提交 Git。此入口为 HTTP，不具备 HTTPS 的传输加密；临时密码不应复用到其他服务。
+
+切换正式域名时，先确认无活动任务并备份数据库；移除预览 drop-in 后 daemon-reload / restart，确认应用回到 127.0.0.1:8765；再启用域名 HTTPS 配置，移除 IP 入口 include，配置验证成功后重载。完成域名实测后删除临时密码文件和私人凭据副本。
 
 ## 运维检查
 
