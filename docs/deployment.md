@@ -2,6 +2,8 @@
 
 使用 Ubuntu 24.04、Python 3.12、FFmpeg 和 Chromium。有界面 Chromium 在 Xvfb 内运行，不提供远程桌面。网页使用 `--remote`：文件先完整下载并检查后保存在服务器 Output，用户通过网页预览、下载视频或图集 ZIP。
 
+2026-10-15 状态：后台常驻服务及真实下载验收通过，公网域名仍返回阿里云备案拦截，HTTPS 证书校验返回 403，尚未上线公网。详见[本次部署验收](validation/2026-10-15-cloud-deploy.md)。Nginx 入口模板及续期钩子尚未启用。
+
 ## 目录与运行方式
 
 - `/home/dev/develop/lumabox`：代码和 `.venv`，以 dev 运行。

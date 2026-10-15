@@ -2,7 +2,7 @@
 
 通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前开发版本为 **0.4.2**（个人云部署与云端文件领取），已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[云部署说明](docs/deployment.md)、[取消与网络诊断验证](docs/validation/2026-10-15-cancel-diagnostics.md)、[日常体验验证记录](docs/validation/2026-10-14-daily-use.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
+当前开发版本为 **0.4.2**（个人云部署与云端文件领取），已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[云部署说明](docs/deployment.md)、[云部署验收](docs/validation/2026-10-15-cloud-deploy.md)、[取消与网络诊断验证](docs/validation/2026-10-15-cancel-diagnostics.md)、[日常体验验证记录](docs/validation/2026-10-14-daily-use.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
 
 ## 当前验证状态
 
@@ -15,6 +15,7 @@
 | Windows 本地网页，0.3 图集 | 成功：7695689642767235187，12/12 张 WebP；逐张完整解码、哈希及 ZIP 内容核对通过 |
 | 最新无头视频测试 | DNS 返回非公网地址，页面请求前停止；未验证到无头提取/下载阶段 |
 | Ubuntu 24.04 云服务器，有界面 Chromium + Xvfb | 命令行视频成功：1920×1080、124.6 秒；图集首次失败，重试 12/12 张成功，均完整解码通过 |
+| 云端 systemd 网页后台 | 真实视频、12 张图集及 ZIP、范围预览、取消后队列继续、重启保留历史及文件哈希通过；公网 HTTPS 尚受备案拦截，未上线 |
 
 Windows 10054 连接关闭回调仍有输出；上述有界面视频运行已成功发布文件，这个回调问题尚未修复。当前只确认以上实测样本，不保证所有作品或网络都成功。
 
