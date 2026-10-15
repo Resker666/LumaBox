@@ -2,7 +2,7 @@
 
 通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前开发版本为 **0.4.1**（取消下载与网络诊断），已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[取消与网络诊断验证](docs/validation/2026-10-15-cancel-diagnostics.md)、[日常体验验证记录](docs/validation/2026-10-14-daily-use.md)、[0.3.0 交付记录](docs/releases/0.3.0.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
+当前开发版本为 **0.4.2**（个人云部署与云端文件领取），已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[云部署说明](docs/deployment.md)、[取消与网络诊断验证](docs/validation/2026-10-15-cancel-diagnostics.md)、[日常体验验证记录](docs/validation/2026-10-14-daily-use.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
 
 ## 当前验证状态
 
@@ -14,7 +14,7 @@
 | Windows 本地网页，0.3 长视频 | 成功：7695003177908784419，1920×1080、960.149 秒、112.19 MiB；实际文件再次完整解码及哈希核对通过 |
 | Windows 本地网页，0.3 图集 | 成功：7695689642767235187，12/12 张 WebP；逐张完整解码、哈希及 ZIP 内容核对通过 |
 | 最新无头视频测试 | DNS 返回非公网地址，页面请求前停止；未验证到无头提取/下载阶段 |
-| Linux / 云服务器 | 未实测 |
+| Ubuntu 24.04 云服务器，有界面 Chromium + Xvfb | 命令行视频成功：1920×1080、124.6 秒；图集首次失败，重试 12/12 张成功，均完整解码通过 |
 
 Windows 10054 连接关闭回调仍有输出；上述有界面视频运行已成功发布文件，这个回调问题尚未修复。当前只确认以上实测样本，不保证所有作品或网络都成功。
 
@@ -31,7 +31,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m lumabox --help
 ```
 
-Linux 安装命令（云服务器尚未实测）：
+Linux 安装命令（Ubuntu 24.04 云服务器已验证，常驻部署见[云部署说明](docs/deployment.md)）：
 
 ```bash
 python3 -m venv .venv
@@ -65,9 +65,9 @@ Windows 默认显示下载用的 Chromium 窗口，与已实测成功的 CLI 一
 .\.venv\Scripts\python.exe -m lumabox.web --output Output --video-limit-mib 2048
 ```
 
-安装网页依赖后也可运行 `.\.venv\Scripts\lumabox-web.exe`；启动无需输入密码。旧 `LUMABOX_WEB_PASSWORD` 不再使用，启动时移除。Windows 支持打开文件夹；Linux/云端文件领取和部署需要另行验收，当前非 Windows 环境可使用保存位置或另存文件。
+安装网页依赖后也可运行 `.\.venv\Scripts\lumabox-web.exe`；启动无需输入密码。旧 `LUMABOX_WEB_PASSWORD` 不再使用，启动时移除。Windows 支持打开文件夹；云端用 `--remote` 显示下载视频和图集 ZIP 的操作。
 
-网页固定监听本机 `127.0.0.1`，保留 Host、同源 Origin、自动获取的 CSRF 及有界请求体检查；本版没有公网部署配置。默认 `WebData/` 保存 SQLite 任务历史，旁边的 `Output/` 保存文件，两者均从 Git 排除。服务启动会核对旧版成功文件哈希，复制到新保存目录，保留原始文件；更改 `--output` 也按同一方式接入历史结果，拒绝覆盖不一致的现有文件。修改 `--data` 会切换到另一份独立任务历史。
+网页固定监听本机 `127.0.0.1`，保留 Host、同源 Origin、自动获取的 CSRF 及有界请求体检查；`--remote` 只调整网页呈现，公网入口由 Nginx 提供 HTTPS 和独立访问认证。默认 `WebData/` 保存 SQLite 任务历史，旁边的 `Output/` 保存文件，两者均从 Git 排除。服务启动会核对旧版成功文件哈希，复制到新保存目录，保留原始文件；更改 `--output` 也按同一方式接入历史结果，拒绝覆盖不一致的现有文件。修改 `--data` 会切换到另一份独立任务历史。
 
 限制：同时运行 1 个任务、最多 10 个等待任务；单任务 60 分钟；单文件总下载最多 30 分钟，视频完整解码最多 15 分钟。这些是处理期限，**不限制视频自身时长**。启动任务前根据所选上限、图集打包开销和磁盘余量检查空间；空间不足时明确失败，成功收藏不会因此自动删除。同一数据目录只允许一个服务实例。图集 ZIP 内报告只包含作品及文件校验信息。
 
@@ -83,7 +83,7 @@ Windows 默认显示下载用的 Chromium 窗口，与已实测成功的 CLI 一
 
 历史支持按标题、作品 ID、链接搜索，按任务状态筛选，并每页显示 20 条。移除已结束任务的记录前会确认，已保存文件保留在 Output；清理失败记录只隐藏失败历史，下载中的任务不能移除。隐藏的记录不再通过网页提供文件，磁盘文件仍可按原路径访问。
 
-已完成本地生成媒体的真实 HTTP/Chromium 网页测试。用户晚间已通过网页成功保存 16 分钟视频及完整 12 张图集，实际文件再次完整解码、哈希及 ZIP 核对通过；该视频超过旧 100 MiB 上限。早间 `UNSAFE_TARGET` 失败记录仍保留，无头和 Linux 仍需分别验收。具体条件见[本地体验改进记录](docs/validation/2026-10-14-local-ux.md)。
+已完成本地生成媒体的真实 HTTP/Chromium 网页测试。用户晚间已通过网页成功保存 16 分钟视频及完整 12 张图集，实际文件再次完整解码、哈希及 ZIP 核对通过；该视频超过旧 100 MiB 上限。早间 `UNSAFE_TARGET` 失败记录仍保留；无头模式未验证成功。具体条件见[本地体验改进记录](docs/validation/2026-10-14-local-ux.md)。
 
 ## 命令行使用
 
@@ -130,6 +130,6 @@ Windows 默认显示下载用的 Chromium 窗口，与已实测成功的 CLI 一
 
 默认测试不访问抖音：运行真实 Chromium、测试 HTTP 服务和 FFmpeg，使用合成页面及新生成媒体。测试环境需允许浏览器进程和回环网络连接。
 
-此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已确认用户正常网络的默认有界面 CLI 成功取得 1080p、124.6 秒的 H.264/AAC 视频，以及完整 12 张图集。实际文件已再次完整解码，图集 ZIP 内容与报告一致。该成功没有启用临时公网 DNS 诊断解析器；返回非公网映射的 VPN DNS 仍会被拒绝。Windows 10054 连接关闭回调仍有输出，尚未修复。无头、其他作品及 Linux 云网络需分别实测；网页验证范围见[网页记录](docs/validation/2026-10-13-local-web.md)。
+此前 Codex 内置浏览器成功下载不算本程序真实下载成功。[早期独立 P0 报告](docs/validation/2026-10-13-independent-p0.md) 保留原 DNS 失败记录；[最新视频验证](docs/validation/2026-10-13-video-normal-response.md) 已确认用户正常网络的默认有界面 CLI 成功取得 1080p、124.6 秒的 H.264/AAC 视频，以及完整 12 张图集。实际文件已再次完整解码，图集 ZIP 内容与报告一致。该成功没有启用临时公网 DNS 诊断解析器；返回非公网映射的 VPN DNS 仍会被拒绝。Windows 10054 连接关闭回调仍有输出，尚未修复。Ubuntu 云服务器已通过同样两个作品的有界面 CLI 验证；无头和其他作品需分别实测。网页验证范围见[网页记录](docs/validation/2026-10-13-local-web.md)。
 
 本阶段自行实现内核，没有复制 Resker666/douyin-downloader 的业务代码。来源范围与设计见 `docs/superpowers/specs/`。

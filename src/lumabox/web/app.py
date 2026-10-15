@@ -138,6 +138,7 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
     @app.get("/api/session")
     def get_session():
         return {"csrf": csrf, "application": "lumabox", "version": __version__,
+                "remote_mode": config.remote_mode,
                 "data_directory": str(config.data_dir),
                 "video_limit_mib": config.video_limit_mib, "max_video_limit_mib": 8192,
                 "output_directory": str(config.output_dir), "pending_limit": 10, "persistent": True,

@@ -33,7 +33,7 @@ const networkFailures = {
 const history = { q: "", status: "all", page: 1, page_size: 20 };
 const cards = new Map();
 let csrf = null, timer = null, searchTimer = null, requestVersion = 0;
-let jobs = [], total = 0, preview = null, previewVersion = 0;
+let jobs = [], total = 0, preview = null, previewVersion = 0, remoteMode = false;
 
 function notice(id, message) {
   $(id).textContent = message || "";
@@ -144,7 +144,7 @@ async function addJob() {
   $("collection-search").value = "";
   $("collection-status").value = "all";
   await refreshJobs();
-  notice("submit-success", "已加入光匣，完成后自动保存在本机。");
+  notice("submit-success", remoteMode ? "已加入光匣，完成后可下载到本机。" : "已加入光匣，完成后自动保存在本机。");
 }
 
 function buildCard(job) {
@@ -168,7 +168,7 @@ function buildCard(job) {
   if (job.status === "failed") detail = failureText(job);
   if (job.status === "success") {
     const media = job.files.filter((file) => file.mime !== "application/zip");
-    detail = `${gallery ? `${job.actual_count} 张图片` : "完整视频"} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · 已保存到本机`;
+    detail = `${gallery ? `${job.actual_count} 张图片` : "完整视频"} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
   }
   if (detail) body.append(element("p", `job-detail ${job.status}`, detail));
   if (job.status === "failed" && networkFailures[job.error_detail?.network_reason]) {
@@ -190,10 +190,19 @@ function buildCard(job) {
     await refreshJobs();
   }, "cancel"));
   if (job.status === "success") {
-    if (job.output_directory) body.append(element("p", "job-path", `保存位置：${job.output_directory}`));
+    if (job.output_directory) body.append(element("p", "job-path", `${remoteMode ? "服务器保存位置" : "保存位置"}：${job.output_directory}`));
     const media = job.files.filter((file) => ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime));
     if (media.length) controls.append(action(gallery ? "预览图集" : "预览视频", "preview-button", () => openPreview(job), "preview"));
-    if (job.output_directory) controls.append(action("打开文件夹", "folder-button", async () => {
+    if (remoteMode) {
+      const primary = job.files.find((file) => file.mime === (gallery ? "application/zip" : "video/mp4"));
+      if (primary) {
+        const link = element("a", "download-link primary", gallery ? "下载整组 ZIP" : "下载视频");
+        link.href = `/api/files/${encodeURIComponent(primary.id)}`;
+        link.download = primary.name;
+        controls.append(link);
+      }
+    }
+    if (!remoteMode && job.output_directory) controls.append(action("打开文件夹", "folder-button", async () => {
       await api(`/api/jobs/${encodeURIComponent(job.id)}/open-folder`, {});
       notice("submit-success", "已打开保存文件夹。");
     }, "folder"));
@@ -212,14 +221,14 @@ function buildCard(job) {
       links.append(link);
     }
     extra.append(links);
-    controls.append(extra);
+    if (!remoteMode || gallery) controls.append(extra);
   }
   if (["failed", "expired", "cancelled"].includes(job.status)) controls.append(action(job.status === "cancelled" ? "重新下载" : "一键重试", "retry-button", async () => {
     await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { video_limit_mib: selectedLimit() });
     await addJob();
   }, "retry"));
   if (["success", "failed", "expired", "cancelled"].includes(job.status)) controls.append(action("移除记录", "remove-button", async () => {
-    if (!window.confirm("移除这条收藏记录？已保存的文件会保留在电脑上。")) return;
+    if (!window.confirm(`移除这条收藏记录？已保存的文件会保留在${remoteMode ? "服务器" : "电脑"}上。`)) return;
     await api(`/api/jobs/${encodeURIComponent(job.id)}/remove`, {});
     await refreshJobs();
   }, "remove"));
@@ -315,7 +324,7 @@ async function showPreviewFile() {
     media.src = path;
     media.hidden = false;
   } catch (error) {
-    if (version === previewVersion) notice("preview-error", error.message || "暂时无法读取本机文件，请稍后重试。");
+    if (version === previewVersion) notice("preview-error", error.message || "暂时无法读取文件，请稍后重试。");
   } finally {
     if (version === previewVersion) $("preview-loading").hidden = true;
   }
@@ -360,7 +369,7 @@ $("preview-dialog").addEventListener("keydown", (event) => {
 $("previous-image").addEventListener("click", () => moveImage(-1));
 $("next-image").addEventListener("click", () => moveImage(1));
 for (const id of ["preview-video", "preview-image"]) $(id).addEventListener("error", () => {
-  if (preview) notice("preview-error", "无法预览此文件，请尝试打开保存文件夹或另存文件。");
+  if (preview) notice("preview-error", remoteMode ? "无法预览此文件，请尝试下载文件。" : "无法预览此文件，请尝试打开保存文件夹或另存文件。");
 });
 
 $("collection-search").addEventListener("input", () => {
@@ -381,7 +390,7 @@ $("clear-failed").addEventListener("click", async () => {
   try {
     const result = await api("/api/jobs/clear-failed", {});
     await refreshJobs();
-    notice("submit-success", `已清理 ${result.removed} 条失败记录，已保存的文件保留在电脑上。`);
+    notice("submit-success", `已清理 ${result.removed} 条失败记录，已保存的文件保留在${remoteMode ? "服务器" : "电脑"}上。`);
   } catch (error) { notice("action-error", error.message); }
   finally { $("clear-failed").disabled = false; }
 });
@@ -402,6 +411,14 @@ async function start() {
   try {
     const settings = await api("/api/session");
     csrf = settings.csrf;
+    remoteMode = settings.remote_mode === true;
+    if (remoteMode) {
+      $("workspace-label").textContent = "云端工作台";
+      $("workspace-description").textContent = "粘贴链接，云端保存，随时下载到你的电脑。";
+      $("storage-heading").textContent = "收藏，保存在云端。";
+      $("storage-description").textContent = "视频保存为 MP4，图集按作品顺序打包。文件检查通过后，即可预览或下载到本机。";
+      $("output-label").textContent = "服务器保存位置";
+    }
     let remembered;
     try { remembered = Number(localStorage.getItem("lumabox.videoLimitMiB")); } catch {}
     $("video-limit").value = Number.isInteger(remembered) && remembered >= 1 && remembered <= 8192 ? remembered : settings.video_limit_mib;
