@@ -27,6 +27,8 @@ mkdir -p WebData/cache WebData/config Output
 
 界面、会话保护、完整回归及真实公网验收见[登录体验验证记录](validation/2026-10-15-cloud-login.md)。
 
+0.4.4 修复 iPhone Safari 将同源 POST 的 Origin 发为 null 的问题；已通过真实 WebKit 和公网验证，见[Safari 修复记录](validation/2026-10-16-safari-login.md)。
+
 0.4.3 使用光匣自己的登录页，云端只需输入访问密码。凭据文件 `WebData/access.json` 至少包含一个非空的 `password` 字符串，由 dev 持有、权限 0600，不提交 Git。服务用 `--access-file /home/dev/develop/lumabox/WebData/access.json` 启用保护；读取失败或格式错误时拒绝启动，文件路径不传给下载子进程。
 
 会话使用随机令牌和 HttpOnly / SameSite=Strict Cookie，令牌本身不包含密码。可勾选记住登录 7 天，不勾选时使用浏览器会话 Cookie且服务端最多保留 8 小时；服务重启或点击退出会要求重新登录。连续 5 次密码错误后短暂限流。收藏列表、下载和预览都要求有效会话。默认本地运行不指定 access-file，继续免登录。
