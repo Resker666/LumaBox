@@ -40,3 +40,15 @@
 最终源码执行 `python -m pytest -q`：387 通过、1 跳过、1 项现有 Starlette 测试客户端弃用警告，耗时 242.91 秒。覆盖真实 Chromium DOM、身份与完整性拒绝条件、配对文件解码和 ZIP、片段失败后清理、短链失败信息保留，以及 Chromium / WebKit 手机尺寸混合预览与片段下载。依赖检查通过。
 
 独立只读审查没有遗留的关键或重要问题。修复了审查中共同关注的完整性边界：单项标志存在但动态播放器尚未出现时，继续等待，不能发布只有图片的成功结果。
+
+## 线上更新与公网验收
+
+云服务更新到 0.4.5，代码提交 `d29214b`。更新前备份 SQLite，并核对原有 6 条历史、15 个文件的哈希；更新后全部保留。首次安装因虚拟环境缺少 setuptools 自动回滚，补齐项目虚拟环境内的 setuptools/wheel 后重新安装成功，依赖检查通过。
+
+使用 Windows 上真实 WebKit、390 × 844 手机视口从公网登录并提交原失败短链，正式任务 `1e7a753cf70742e7b9bf7e41d93e202a` 成功：1/1 页、图片和动态片段总计 1471433 字节，文件哈希与上表一致。服务保持 active、NRestarts=0。
+
+在公网继续用 Chromium 验证：图片和 MP4 可领取且哈希匹配，片段 Range 请求返回 206；ZIP 包含 `01.webp`、`01-motion.mp4`、`report.json`，内容哈希一致，报告不包含服务器路径。混合预览切换正确，实际视频读到 1280 × 720、5.1 秒，并可播放。ZIP 为 1472395 字节，SHA-256 为 `fd1dd5a9900e4a8ae001b251779ccbe0f6ef3ed0b505262a459ce7c164f66dd2`。
+
+验证边界：Windows WebKit 的登录、提交、下载和 ZIP 校验通过；但这条公网片段的原生播放返回 MEDIA_ERR_SRC_NOT_SUPPORTED，未通过播放验收。服务器 FFprobe 确认其为 H.264/AAC，Chromium 能播放；现有本地 WebKit 夹具预览也通过。不能据此声称 iPhone Safari 实机播放已通过。仍需在实际手机确认，见待办。Playwright 也说明[媒体编解码能力随操作系统而不同](https://playwright.dev/python/docs/browsers#webkit)。
+
+公网验收 JSON、截图和 WebKit 探针均保存在本地 `.superpowers/cloud-deploy/single-note-validation/` 忽略目录，未提交凭据或实际媒体。
