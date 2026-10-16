@@ -30,6 +30,15 @@ const networkFailures = {
   TLS_ERROR: "TLS 安全连接失败，请检查系统时间、证书或代理设置后重试。",
   CONNECTION_FAILED: "网络连接失败，请检查网络或代理设置后重试。"
 };
+const mediaFailures = {
+  TARGET_UNCONFIRMED: "页面已打开，但尚未确认目标作品区域，暂未保存文件。",
+  WORK_CHANGED: "页面切换到了其他作品，下载已停止，请重新提交原链接。",
+  MEDIA_COUNT_UNCONFIRMED: "已识别作品页面，但无法确认完整页数，暂未保存文件。",
+  MEDIA_ORDER_UNCONFIRMED: "作品图片尚未全部加载，或无法确认完整顺序，暂未保存文件。",
+  MEDIA_URL_UNAVAILABLE: "播放器尚未提供可下载的完整媒体地址，请稍后重试。",
+  MOTION_URL_UNAVAILABLE: "已识别动态照片，但动态片段尚未加载完整，请稍后重试。",
+  IMAGES_LOADING: "作品仍在显示默认占位图片，请稍后重试。"
+};
 const history = { q: "", status: "all", page: 1, page_size: 20 };
 const cards = new Map();
 let csrf = null, timer = null, searchTimer = null, requestVersion = 0;
@@ -87,6 +96,7 @@ function updateLimit() {
 
 function failureText(job) {
   if (networkFailures[job.error_detail?.network_reason]) return networkFailures[job.error_detail.network_reason];
+  if (job.error === "UNSUPPORTED_MEDIA" && mediaFailures[job.error_detail?.media_reason]) return mediaFailures[job.error_detail.media_reason];
   if (job.error !== "SIZE_LIMIT") return failures[job.error] || failures.DOWNLOAD_FAILED;
   const detail = job.error_detail || {};
   const limit = detail.limit_bytes || (job.video_limit_mib || 100) * 1024 ** 2;
@@ -169,7 +179,9 @@ function buildCard(job) {
   if (job.status === "failed") detail = failureText(job);
   if (job.status === "success") {
     const media = job.files.filter((file) => file.mime !== "application/zip");
-    detail = `${gallery ? `${job.actual_count} 张图片` : "完整视频"} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
+    const motions = gallery ? media.filter((file) => file.mime === "video/mp4").length : 0;
+    const description = gallery ? `${job.actual_count} 张图片${motions ? ` · ${motions} 段动态片段` : ""}` : "完整视频";
+    detail = `${description} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
   }
   if (detail) body.append(element("p", `job-detail ${job.status}`, detail));
   if (job.status === "failed" && networkFailures[job.error_detail?.network_reason]) {
@@ -214,7 +226,7 @@ function buildCard(job) {
     const links = element("div", "file-links");
     const ordered = [...job.files].sort((a, b) => (b.mime === "application/zip") - (a.mime === "application/zip"));
     for (const file of ordered) {
-      const name = file.mime === "application/zip" ? "另存整组 ZIP" : gallery ? `另存图片 ${file.name.split(".")[0]}` : "另存视频";
+      const name = file.mime === "application/zip" ? "另存整组 ZIP" : gallery ? (file.mime === "video/mp4" ? `另存动态片段 ${file.name.split("-")[0]}` : `另存图片 ${file.name.split(".")[0]}`) : "另存视频";
       const link = element("a", "download-link", name);
       link.href = `/api/files/${encodeURIComponent(file.id)}`;
       link.download = file.name;
@@ -297,6 +309,10 @@ async function poll() {
 function releasePreview() {
   ++previewVersion;
   preview = null;
+  clearPreviewMedia();
+}
+
+function clearPreviewMedia() {
   $("preview-video").pause();
   $("preview-video").removeAttribute("src");
   $("preview-video").load();
@@ -308,6 +324,8 @@ async function showPreviewFile() {
   const version = ++previewVersion, file = preview.files[preview.index];
   const path = `/api/files/${encodeURIComponent(file.id)}/preview`;
   const gallery = preview.kind === "gallery";
+  const image = file.mime !== "video/mp4";
+  clearPreviewMedia();
   $("preview-video").hidden = true;
   $("preview-image").hidden = true;
   $("gallery-navigation").hidden = !gallery;
@@ -320,8 +338,8 @@ async function showPreviewFile() {
     const response = await fetch(path, { method: "HEAD", cache: "no-store", mode: "same-origin", credentials: "same-origin", signal: AbortSignal.timeout(12000) });
     if (version !== previewVersion) return;
     if (!response.ok) throw new Error("文件可能已移动或删除，请检查保存位置后重新下载。");
-    const media = gallery ? $("preview-image") : $("preview-video");
-    if (gallery) media.alt = `图片 ${preview.index + 1} / ${preview.files.length} · ${file.name}`;
+    const media = image ? $("preview-image") : $("preview-video");
+    if (image) media.alt = `图片 ${preview.index + 1} / ${preview.files.length} · ${file.name}`;
     media.src = path;
     media.hidden = false;
   } catch (error) {
@@ -333,7 +351,7 @@ async function showPreviewFile() {
 
 async function openPreview(job) {
   releasePreview();
-  preview = { kind: job.kind, index: 0, files: job.files.filter((file) => job.kind === "gallery" ? ["image/jpeg", "image/webp"].includes(file.mime) : file.mime === "video/mp4") };
+  preview = { kind: job.kind, index: 0, files: job.files.filter((file) => ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime)) };
   if (!preview.files.length) return;
   $("preview-title").textContent = title(job);
   $("preview-identity").textContent = job.work_id ? `作品 ID ${job.work_id}` : "";

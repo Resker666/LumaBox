@@ -162,9 +162,11 @@ class JobWorker:
                 result.get("metadata_parsed") is not True or result.get("checks", {}).get("full_decode") is not True):
             raise WebError("VERIFY_FAILED")
         entries = result["files"]
+        expected = result["expected_count"]
         if (not isinstance(entries, list) or not 1 <= len(entries) <= 100 or
-                result["expected_count"] != len(entries) or result["actual_count"] != len(entries) or
-                (kind == "video" and len(entries) != 1)):
+                type(expected) is not int or not 1 <= expected <= 50 or result["actual_count"] != expected or
+                not expected <= len(entries) <= 2 * expected or
+                (kind == "video" and (len(entries) != 1 or expected != 1))):
             raise WebError("VERIFY_FAILED")
         dest = directory / f"{work_id}-{run_id}"
         if Path(result["output_directory"]) != dest or Path(result["report_path"]) != dest / "report.json":
@@ -174,14 +176,25 @@ class JobWorker:
         if report.stat().st_size > 256 * 1024 or json.loads(report.read_bytes()) != result:
             raise WebError("VERIFY_FAILED")
         files = []
-        for index, entry in enumerate(entries, 1):
+        image_count, motion_orders = 0, set()
+        for entry in entries:
             self._check_cancelled(job["id"])
             name = entry["name"]
-            valid_name = name == f"{work_id}.mp4" if kind == "video" else bool(re.fullmatch(fr"{index:02d}\.(jpg|webp)", name))
+            is_video = kind == "video"
+            if kind == "video":
+                valid_name = name == f"{work_id}.mp4"
+            elif re.fullmatch(fr"{image_count + 1:02d}\.(jpg|webp)", name):
+                image_count += 1
+                valid_name = True
+            else:
+                valid_name = image_count > 0 and name == f"{image_count:02d}-motion.mp4" and image_count not in motion_orders
+                if valid_name:
+                    motion_orders.add(image_count)
+                    is_video = True
             if not valid_name or type(entry["bytes"]) is not int or entry["bytes"] <= 0:
                 raise WebError("VERIFY_FAILED")
             path = self.store.safe_path(str(relative_dir / name))
-            limit = video_limit_bytes(job["video_limit_mib"]) if kind == "video" else IMAGE_LIMIT
+            limit = video_limit_bytes(job["video_limit_mib"]) if is_video else IMAGE_LIMIT
             if (path.stat().st_size != entry["bytes"] or entry["bytes"] > limit or
                     not isinstance(entry["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])):
                 raise WebError("VERIFY_FAILED")
@@ -191,10 +204,14 @@ class JobWorker:
             if any(type(entry[k]) is not int or entry[k] <= 0 for k in ("width", "height")):
                 raise WebError("VERIFY_FAILED")
             duration = entry["duration"]
-            if kind == "video" and (not isinstance(duration, (float, int)) or not math.isfinite(duration) or duration <= 0):
+            if is_video and (type(duration) not in (float, int) or not math.isfinite(duration) or duration <= 0):
+                raise WebError("VERIFY_FAILED")
+            if not is_video and duration is not None:
                 raise WebError("VERIFY_FAILED")
             files.append({**entry, "relative_path": str(relative_dir / name),
-                          "mime": "video/mp4" if kind == "video" else "image/webp" if name.endswith(".webp") else "image/jpeg"})
+                          "mime": "video/mp4" if is_video else "image/webp" if name.endswith(".webp") else "image/jpeg"})
+        if kind == "gallery" and image_count != expected:
+            raise WebError("VERIFY_FAILED")
         if sum(f["bytes"] for f in files) != result["bytes"] or (kind == "gallery" and result["bytes"] > GALLERY_LIMIT):
             raise WebError("VERIFY_FAILED")
         if kind == "gallery":

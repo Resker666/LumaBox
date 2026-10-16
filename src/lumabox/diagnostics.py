@@ -8,6 +8,15 @@ NETWORK_REASONS = frozenset({"DNS_NON_PUBLIC", "DNS_LOOKUP_FAILED", "DNS_TIMEOUT
     "TLS_ERROR", "CONNECTION_FAILED"})
 STAGES = frozenset({"dns_resolution", "page_navigation", "browser_start", "browser_load",
     "media_extraction", "media_transfer", "media_verification", "publication", "input_policy", "target_identity"})
+MEDIA_REASONS = {
+    "Target work region could not be confirmed": "TARGET_UNCONFIRMED",
+    "The browser switched to a different work": "WORK_CHANGED",
+    "Complete media count could not be confirmed": "MEDIA_COUNT_UNCONFIRMED",
+    "The complete ordered work was not available": "MEDIA_ORDER_UNCONFIRMED",
+    "A normal HTTPS media resource is not available": "MEDIA_URL_UNAVAILABLE",
+    "The slide's motion resource is not available": "MOTION_URL_UNAVAILABLE",
+    "Gallery images are still showing the site's default placeholder": "IMAGES_LOADING",
+}
 
 
 def network_reason(error):
@@ -42,4 +51,8 @@ def public_diagnostics(diagnostics):
             detail["stage"] = stage
         if isinstance(host, str) and re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", host):
             detail["host"] = host.lower()
+    message = diagnostics.get("reason")
+    media_reason = MEDIA_REASONS.get(message) if isinstance(message, str) else None
+    if media_reason and diagnostics.get("stage") in {"media_extraction", "target_identity"}:
+        detail.update(media_reason=media_reason, stage=diagnostics["stage"])
     return detail

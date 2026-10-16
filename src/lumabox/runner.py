@@ -13,6 +13,7 @@ from .browser import BrowserSession
 from .errors import LumaBoxError
 from .limits import DEFAULT_VIDEO_LIMIT_MIB, IMAGE_LIMIT, GALLERY_LIMIT, video_limit_bytes
 from .metadata import normalize_title
+from .models import MediaResource
 from .progress import ProgressFile, validate_progress_path
 from .transfer import download_resource
 from .urls import parse_input
@@ -97,39 +98,47 @@ async def run_download(text: str, output: Path, headless: bool = False, *, video
                     future.cancel()
                     raise
 
+            completed = 0
             for resource in work.resources:
                 name = f"{work.work_id}.mp4" if work.kind == "video" else f"{resource.order:02d}.jpg"
-                path = temporary / name
-                limit = video_limit if work.kind == "video" else min(IMAGE_LIMIT, GALLERY_LIMIT - result["bytes"])
-                if limit <= 0:
-                    raise LumaBoxError("SIZE_LIMIT", "Gallery exceeds the total size limit", diagnostics={"limit_bytes": GALLERY_LIMIT})
-                stage = "media_transfer"
-                transfer_options = {}
+                components = [(resource, name, work.kind)]
+                if resource.motion_url:
+                    components.append((MediaResource(resource.motion_url, resource.order), f"{resource.order:02d}-motion.mp4", "video"))
+                for component, name, media_kind in components:
+                    path = temporary / name
+                    limit = video_limit if media_kind == "video" else IMAGE_LIMIT
+                    if work.kind == "gallery":
+                        limit = min(limit, GALLERY_LIMIT - result["bytes"])
+                    if limit <= 0:
+                        raise LumaBoxError("SIZE_LIMIT", "Gallery exceeds the total size limit", diagnostics={"limit_bytes": GALLERY_LIMIT})
+                    stage = "media_transfer"
+                    transfer_options = {}
+                    if progress:
+                        base = result["bytes"]
+                        progress.emit(stage=stage, resource_index=resource.order, completed_count=completed)
+                        def received(count, total):
+                            progress.emit(bytes_received=base + count, bytes_total=total if work.kind == "video" else None)
+                        transfer_options["progress"] = received
+                    count = await _blocking(download_resource, component, path, headers, limit, cancel, cancel=cancel, **transfer_options)
+                    if count > limit:
+                        raise LumaBoxError("SIZE_LIMIT", "Media exceeds the size limit", diagnostics={"limit_bytes": limit, "actual_bytes": count})
+                    stage = "media_verification"
+                    if progress:
+                        progress.emit(stage=stage, bytes_received=result["bytes"] + count)
+                    verified = await _blocking(verify_file, path, media_kind, cancel=cancel)
+                    if verified.name != path.name:
+                        path.rename(temporary / verified.name)
+                    result["files"].append(asdict(verified))
+                    result["bytes"] += verified.bytes
+                completed += 1
                 if progress:
-                    base = result["bytes"]
-                    progress.emit(stage=stage, resource_index=resource.order, completed_count=len(result["files"]))
-                    def received(count, total):
-                        progress.emit(bytes_received=base + count, bytes_total=total if work.kind == "video" else None)
-                    transfer_options["progress"] = received
-                count = await _blocking(download_resource, resource, path, headers, limit, cancel, cancel=cancel, **transfer_options)
-                if count > limit:
-                    raise LumaBoxError("SIZE_LIMIT", "Media exceeds the size limit", diagnostics={"limit_bytes": limit, "actual_bytes": count})
-                stage = "media_verification"
-                if progress:
-                    progress.emit(stage=stage, bytes_received=result["bytes"] + count)
-                verified = await _blocking(verify_file, path, work.kind, cancel=cancel)
-                if verified.name != path.name:
-                    path.rename(temporary / verified.name)
-                result["files"].append(asdict(verified))
-                result["bytes"] += verified.bytes
-                if progress:
-                    progress.emit(completed_count=len(result["files"]))
+                    progress.emit(completed_count=completed)
         result["http_status"] = session.http_status
         stage = "publication"
         if progress:
-            progress.emit(stage=stage, bytes_received=result["bytes"], completed_count=len(result["files"]), resource_index=None)
+            progress.emit(stage=stage, bytes_received=result["bytes"], completed_count=completed, resource_index=None)
         destination = root / f"{work.work_id}-{run_id}"
-        result.update(status="success", actual_count=len(result["files"]), output_directory=str(destination),
+        result.update(status="success", actual_count=completed, output_directory=str(destination),
                       checks={"full_decode": True}, report_path=str(destination / "report.json"))
         _write_report(temporary / "report.json", result)
         if work.kind == "gallery":
@@ -157,6 +166,9 @@ async def run_download(text: str, output: Path, headless: bool = False, *, video
                 result["cleanup_failed"] = True
     if session is not None:
         result["http_status"] = getattr(session, "http_status", None)
+        confirmed = getattr(session, "confirmed_work", None)
+        if confirmed:
+            result.update(work_id=confirmed[0], kind=confirmed[1], title=normalize_title(confirmed[2]))
     result["diagnostics"] = {"stage": stage, **failure_diagnostics}
     if stage == "browser_load" and session is not None:
         result["diagnostics"].update(getattr(session, "diagnostics", {}))

@@ -12,6 +12,7 @@ class InputLink:
 class MediaResource:
     url: str = field(repr=False)
     order: int
+    motion_url: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
