@@ -45,7 +45,7 @@ async def test_picture_progress_confirms_static_single_note_without_music(static
 
 @pytest.mark.parametrize("defect", [
     "first_of_multiple", "no_progress", "outside_progress", "two_controls",
-    "not_picture", "nonzero_index", "extra_slide", "unexpected_motion", "wrong_identity",
+    "not_picture", "nonzero_index", "extra_slide", "unexpected_motion", "wrong_identity", "live_marker_without_motion",
 ])
 async def test_static_single_needs_consistent_picture_progress_and_identity(static_page, defect):
     mutations = {
@@ -58,6 +58,7 @@ async def test_static_single_needs_consistent_picture_progress_and_identity(stat
         "extra_slide": "document.querySelector('.track').append(document.querySelector('.dySwiperSlide').cloneNode(true))",
         "unexpected_motion": "document.querySelector('.dySwiperSlide').append(document.createElement('video'))",
         "wrong_identity": "document.querySelector('[data-e2e-vid]').setAttribute('data-e2e-vid','7696824302280965050')",
+        "live_marker_without_motion": "document.querySelector('xg-progress').classList.add('one-live-hide')",
     }
     await static_page.evaluate(mutations[defect])
     snapshot = await static_page.evaluate(DOM_SNAPSHOT, {"work_id": ID, "kind": "gallery"})

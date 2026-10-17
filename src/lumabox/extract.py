@@ -72,7 +72,8 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
    const pictureLists = controls.length === 1 && controls[0].matches('xg-progress[data-index="0"]')
      ? controls[0].querySelectorAll(':scope > xg-outer.xgplayer-progress-outer.picture > xg-inners.progress-list') : [];
    const singleStatic = scopedSingle && slides[0].querySelectorAll('video').length === 0 &&
-     pictureLists.length === 1 && pictureLists[0].children.length === 1 &&
+     pictureLists.length === 1 && !controls[0].classList.contains('one-live-hide') &&
+     pictureLists[0].children.length === 1 &&
      pictureLists[0].firstElementChild.matches('xg-inner.xgplayer-progress-inner.picture-inner') &&
      controls[0].querySelectorAll('xg-inner.picture-inner').length === 1;
    const single = singleLive || singleStatic;
