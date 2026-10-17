@@ -33,7 +33,7 @@ def preview_response(store, file_id: str, request):
                 lease.__exit__(None, None, None)
 
     try:
-        if file["mime"] not in ("video/mp4", "image/jpeg", "image/webp"):
+        if file["mime"] not in ("video/mp4", "image/jpeg", "image/webp", "audio/mp4"):
             raise WebError("PREVIEW_UNAVAILABLE", 415)
         size = file["bytes"]
         start, end, status = 0, size - 1, 200

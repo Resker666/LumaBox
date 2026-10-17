@@ -122,6 +122,7 @@ def test_remove_record_confirmation_retains_media_and_clear_failed(daily_server,
     try:
         page.goto(url)
         card = page.locator(".job-card").filter(has=page.get_by_text("已完成", exact=True))
+        card.get_by_text("更多", exact=True).click()
         expect(card.get_by_role("button", name="移除记录", exact=True)).to_be_visible()
         confirmations = []
         def cancel(dialog):
@@ -154,6 +155,7 @@ def test_video_preview_uses_range_seek_and_survives_polling(daily_server, browse
     page.on("response", lambda response: ranges.append(response) if response.url.endswith("/preview") and response.request.headers.get("range") else None)
     try:
         page.goto(url)
+        page.get_by_text("更多", exact=True).click()
         page.get_by_text("另存文件", exact=True).click()
         preview_button = page.get_by_role("button", name="预览视频", exact=True)
         expect(preview_button).to_be_visible()
@@ -249,7 +251,7 @@ def test_title_and_real_progress_are_rendered_without_html(daily_server, browser
     try:
         page.goto(url)
         submit(page, URL)
-        expect(page.locator("#job-list").get_by_text("下载中", exact=True)).to_be_visible(timeout=6000)
+        expect(page.locator("#active-list").get_by_text("下载中", exact=True)).to_be_visible(timeout=6000)
         job = worker.store.list()[0]
         title = '<img src=x onerror="window.injected=true"> 我的收藏'
         assert worker.store.update_progress(job["id"], {"stage": "media_transfer", "work_id": WORK_ID, "kind": "video", "title": title, "bytes_received": 1048576, "bytes_total": 4194304})
@@ -280,7 +282,7 @@ def test_gallery_progress_uses_verified_counts_and_current_image(daily_server, b
     try:
         page.goto(url)
         submit(page, "https://v.douyin.com/test/")
-        expect(page.locator("#job-list").get_by_text("下载中", exact=True)).to_be_visible(timeout=6000)
+        expect(page.locator("#active-list").get_by_text("下载中", exact=True)).to_be_visible(timeout=6000)
         job = worker.store.list()[0]
         assert worker.store.update_progress(job["id"], {"stage": "media_transfer", "work_id": WORK_ID, "kind": "gallery", "bytes_received": 1048576, "bytes_total": None, "completed_count": 1, "expected_count": 3, "resource_index": 2})
         expect(page.get_by_text("已检查 1 / 3 张", exact=False)).to_be_visible(timeout=6000)
@@ -307,6 +309,7 @@ def test_poll_recovery_retains_an_unrelated_action_error(daily_server, browser):
     page = context.new_page()
     try:
         page.goto(url)
+        page.get_by_text("更多", exact=True).click()
         page.get_by_role("button", name="打开文件夹", exact=True).click()
         error = page.locator("#action-error")
         expect(error).to_be_visible()

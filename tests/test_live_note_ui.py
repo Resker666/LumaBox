@@ -39,6 +39,7 @@ result['bytes']+=len(motion)
         expect(page.locator("#preview-image")).to_be_visible()
         assert page.locator("#preview-video").get_attribute("src") is None
         page.get_by_role("button", name="关闭预览", exact=True).click()
+        page.get_by_text("更多", exact=True).click()
         page.get_by_text("另存文件", exact=True).click()
         link = page.get_by_role("link", name="另存动态片段 01", exact=True)
         expect(link).to_be_visible()

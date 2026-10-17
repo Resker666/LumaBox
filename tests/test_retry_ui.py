@@ -18,7 +18,7 @@ def test_retry_wait_can_cancel(retry_server, browser):
     page = browser.new_page(viewport={"width": 390, "height": 844})
     try:
         page.goto(url); submit(page, URL)
-        expect(page.locator("#job-list").get_by_text("等待重试", exact=True)).to_be_visible(timeout=15000)
+        expect(page.locator("#active-list").get_by_text("等待重试", exact=True)).to_be_visible(timeout=15000)
         page.get_by_role("button", name="取消下载", exact=True).click()
         expect(page.locator("#job-list").get_by_text("已取消", exact=True)).to_be_visible()
         assert worker.store.search()["jobs"][0]["attempt_count"] == 1

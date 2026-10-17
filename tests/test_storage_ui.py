@@ -16,8 +16,9 @@ def test_hidden_collection_can_restore_and_delete_with_confirmation(daily_server
     page.on("request", lambda request: purges.append(request.url) if request.url.endswith("/purge") else None)
     try:
         page.goto(url)
-        expect(page.get_by_text("系统可用空间", exact=True)).to_be_visible()
+        expect(page.get_by_text("系统可用空间", exact=True)).to_be_hidden()
         page.get_by_role("button", name="文件管理", exact=True).click()
+        expect(page.get_by_text("系统可用空间", exact=True)).to_be_visible()
         page.get_by_label("文件范围").select_option("hidden")
         card = page.locator(f'[data-storage-job-id="{job["id"]}"]')
         expect(card.get_by_text("记录已移除，文件保留", exact=True)).to_be_visible()

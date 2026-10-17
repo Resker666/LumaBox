@@ -92,6 +92,8 @@ class JobWorker:
     def run_once(self) -> bool:
         if self.stopping.is_set():
             return False
+        if self.store.audio.run_once(self.stopping):
+            return True
         job = self.store.claim()
         if job is None:
             return False

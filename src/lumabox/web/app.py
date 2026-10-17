@@ -17,6 +17,7 @@ from .access import CloudAccess, AccessBoundary, COOKIE
 from .duplicates import DuplicateWorkError
 
 MESSAGES = {
+    "AUDIO_UNAVAILABLE": "请先完成视频下载，再提取音频；本版暂不支持图集配乐。",
     "FILE_IN_USE": "文件正在下载或预览，请停止预览或等待传输完成后再删除。",
     "UNSAFE_DELETE": "目录包含无法确认归属的内容或链接，未执行删除，请检查保存位置。",
     "OUTPUT_CHANGED": "此删除任务属于旧保存目录，请切回原目录后处理。",
@@ -166,9 +167,25 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
         if worker.stopping.is_set():
             raise WebError("SERVER_ERROR", 503)
         body = await object_body(request)
-        if "input" not in body or set(body) - {"input", "video_limit_mib", "force_download"}:
+        if "input" not in body or set(body) - {"input", "video_limit_mib", "force_download", "include_audio"}:
             raise WebError("INVALID_REQUEST")
-        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib), force_download=body.get("force_download", False))
+        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib), force_download=body.get("force_download", False), include_audio=body.get("include_audio", False))
+
+    @app.post("/api/jobs/{job_id}/audio", status_code=202)
+    async def extract_job_audio(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        if worker.stopping.is_set():
+            raise WebError("SERVER_ERROR", 503)
+        return store.audio.request(job_id)
+
+    @app.post("/api/jobs/{job_id}/audio/cancel")
+    async def cancel_job_audio(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        return store.audio.cancel(job_id)
 
     @app.get("/api/storage")
     def storage_summary(request: Request):
@@ -238,7 +255,11 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
             page, page_size = int(query.get("page", "1")), int(query.get("page_size", "20"))
         except ValueError:
             raise WebError("INVALID_REQUEST") from None
-        return store.search(query.get("q", ""), query.get("status", "all"), page, page_size)
+        return store.search(query.get("q", ""), query.get("status", "all"), page, page_size, scope=query.get("scope", "all"))
+
+    @app.get("/api/jobs/active")
+    def active_jobs():
+        return {"jobs": store.active()}
 
     @app.post("/api/jobs/clear-failed")
     async def clear_failed(request: Request):

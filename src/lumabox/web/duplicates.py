@@ -12,7 +12,7 @@ class DuplicateWorkError(WebError):
 
 
 def available(store, db, job_id):
-    files = db.execute("SELECT * FROM files WHERE job_id=?", (job_id,)).fetchall()
+    files = db.execute("SELECT * FROM files WHERE job_id=? AND mime<>'audio/mp4'", (job_id,)).fetchall()
     if not files:
         return False
     try:
@@ -38,6 +38,6 @@ def find_match(store, db, *, url, work_id, kind, exclude_id=None, force_download
         if not active and (force_download or not available(store, db, row["id"])):
             continue
         return {"id": row["id"], "match_type": "active" if active else "saved",
-                "hidden": row["hidden_at"] is not None, "work_id": row["work_id"],
+                "hidden": row["hidden_at"] is not None, "work_id": row["work_id"], "kind": row["kind"],
                 "title": normalize_title(row["title"])}
     return None

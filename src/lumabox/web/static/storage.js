@@ -32,14 +32,15 @@ window.LumaBoxStorage = {
       const date = new Date(item.created_at * 1000).toLocaleString("zh-CN");
       body.append(node("p", "job-meta", `${date} · ${item.file_count} 个文件 · ${formatSize(item.bytes)}（含打包与报告）`));
       const deleting = ["deleting", "delete_failed"].includes(item.storage_state);
-      const state = active.has(item.status) ? "任务正在处理，暂不能删除" : deleting ? "文件尚未全部删除" : item.hidden ? "记录已移除，文件保留" : "文件和收藏记录均保留";
+      const busy = active.has(item.status) || item.audio_active;
+      const state = item.audio_active ? "音频正在处理，完成或取消后可管理" : active.has(item.status) ? "任务正在处理，暂不能删除" : deleting ? "文件尚未全部删除" : item.hidden ? "记录已移除，文件保留" : "文件和收藏记录均保留";
       body.append(node("p", "job-detail", state));
       const controls = node("div", "job-controls");
-      if (item.hidden && item.status === "success" && !deleting) controls.append(button("恢复收藏", async () => {
+      if (item.hidden && item.status === "success" && !deleting && !busy) controls.append(button("恢复收藏", async () => {
         await request(`/api/jobs/${encodeURIComponent(item.id)}/restore`, {});
         await changed(); notice("storage-success", "已恢复到收藏。");
       }));
-      if (!active.has(item.status)) {
+      if (!busy) {
         if (!item.hidden && !deleting) controls.append(button("仅移除记录", async () => {
           if (!window.confirm(`仅移除“${title}”的记录？文件会保留，仍可在文件管理中找到。`)) return;
           await request(`/api/jobs/${encodeURIComponent(item.id)}/remove`, {});
@@ -87,7 +88,7 @@ window.LumaBoxStorage = {
       } catch (error) { if (current === version) notice("storage-error", error.message); }
     }
     get("open-storage").addEventListener("click", () => {
-      notice("storage-error", ""); notice("storage-success", ""); dialog.showModal(); refresh();
+      notice("storage-error", ""); notice("storage-success", ""); dialog.showModal(); refresh(true);
     });
     get("close-storage").addEventListener("click", () => dialog.close());
     get("storage-scope").addEventListener("change", () => { page = 1; refresh(); });

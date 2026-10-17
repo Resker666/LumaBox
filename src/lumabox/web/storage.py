@@ -85,7 +85,8 @@ class StorageManager:
                 if not group["file_count"] and row["storage_state"] not in {"deleting", "delete_failed"}:
                     continue
                 items.append({key: row[key] for key in ("id", "work_id", "kind", "status", "created_at", "storage_state")})
-                items[-1].update(group, title=normalize_title(row["title"]), hidden=row["hidden_at"] is not None)
+                items[-1].update(group, title=normalize_title(row["title"]), hidden=row["hidden_at"] is not None,
+                                 audio_active=row["audio_state"] in ('pending', 'running', 'cancelling'))
             total = sum(lengths.values())
             snapshot = {"summary": {"output_bytes": total, "saved_bytes": saved, "hidden_bytes": hidden,
                 "other_bytes": max(0, total - saved), "saved_count": len(saved_ids), "disk_free_bytes": disk_free,
@@ -140,7 +141,7 @@ class StorageManager:
                 if (relative.is_absolute() or len(relative.parts) != 3 or relative.parts[0] != job_id or
                         not re.fullmatch(fr"{re.escape(row['work_id'] or '')}-[0-9a-f]{{32}}", relative.parts[1]) or
                         relative.name != file["name"] or not re.fullmatch(
-                            r"(?:[0-9]{15,20}(?:-images)?|[0-9]{2}(?:-motion)?)\.(?:mp4|zip|jpg|webp)", relative.name)):
+                            r"(?:[0-9]{15,20}(?:-images|-audio-[0-9a-f]{32})?|[0-9]{2}(?:-motion)?)\.(?:mp4|zip|jpg|webp|m4a)", relative.name)):
                     raise WebError("UNSAFE_DELETE", 409)
                 self._checked(str(relative))
                 allowed.update({str(relative), str(relative.parent / "report.json")})
@@ -186,7 +187,7 @@ class StorageManager:
                 row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
                 raise WebError("NOT_FOUND", 404)
-            if row["status"] in ACTIVE:
+            if row["status"] in ACTIVE or row["audio_state"] in ('pending', 'running', 'cancelling'):
                 raise WebError("JOB_ACTIVE", 409)
             if row["storage_state"] == "deleted":
                 return {"status": "deleted", "deleted_bytes": 0}
