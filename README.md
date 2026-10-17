@@ -2,7 +2,7 @@
 
 通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前开发版本为 **0.6.0**（手机界面精简与可选视频音频），云端正式运行版本仍为 **0.5.1**。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
+当前版本为 **0.6.0**（手机界面精简与可选视频音频），云端已升级至同一版本，含 Windows 下载结果编码修复。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[0.6.0 上线记录](docs/validation/2026-10-17-production-0.6.0.md)、[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
 
 ## 当前验证状态
 
