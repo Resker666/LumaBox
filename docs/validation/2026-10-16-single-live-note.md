@@ -52,3 +52,7 @@
 验证边界：Windows WebKit 的登录、提交、下载和 ZIP 校验通过；但这条公网片段的原生播放返回 MEDIA_ERR_SRC_NOT_SUPPORTED，未通过播放验收。服务器 FFprobe 确认其为 H.264/AAC，Chromium 能播放；现有本地 WebKit 夹具预览也通过。不能据此声称 iPhone Safari 实机播放已通过。仍需在实际手机确认，见待办。Playwright 也说明[媒体编解码能力随操作系统而不同](https://playwright.dev/python/docs/browsers#webkit)。
 
 公网验收 JSON、截图和 WebKit 探针均保存在本地 `.superpowers/cloud-deploy/single-note-validation/` 忽略目录，未提交凭据或实际媒体。
+
+## 用户验收
+
+2026-10-16，用户在收到本版结果及 iPhone Safari 实机预览确认事项后反馈“验证通过”，并要求推送。实机确认事项据此完成；此前 Windows WebKit 自动化播放未通过的记录保持不变，不将用户验收改写为自动化测试通过。
