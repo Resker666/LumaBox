@@ -14,8 +14,12 @@ from .media import preview_response
 from .store import JobStore
 from .worker import JobWorker
 from .access import CloudAccess, AccessBoundary, COOKIE
+from .duplicates import DuplicateWorkError
 
 MESSAGES = {
+    "ALREADY_DOWNLOADING": "此作品已在队列中，请查看已有任务。",
+    "DUPLICATE_WORK": "此作品已经保存，可查看已有收藏或选择重新下载。",
+    "RESULT_UNAVAILABLE": "已保存的文件不可用，可重新下载此作品。",
     "FORBIDDEN": "请求校验失败，请刷新页面重试。",
     "INVALID_REQUEST": "请求格式不正确。", "BODY_TOO_LARGE": "提交内容过长，请缩短后重试。",
     "JSON_REQUIRED": "请提交 JSON 格式的请求。", "INVALID_INPUT": "请粘贴一条抖音视频或图集链接。",
@@ -28,7 +32,10 @@ MESSAGES = {
 
 
 def error_response(error: WebError):
-    return JSONResponse({"error": error.code, "message": MESSAGES.get(error.code, MESSAGES["SERVER_ERROR"])}, status_code=error.status)
+    body = {"error": error.code, "message": MESSAGES.get(error.code, MESSAGES["SERVER_ERROR"])}
+    if isinstance(error, DuplicateWorkError):
+        body["existing"] = error.existing
+    return JSONResponse(body, status_code=error.status)
 
 
 class LocalBoundary:
@@ -155,9 +162,16 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
         if worker.stopping.is_set():
             raise WebError("SERVER_ERROR", 503)
         body = await object_body(request)
-        if "input" not in body or set(body) - {"input", "video_limit_mib"}:
+        if "input" not in body or set(body) - {"input", "video_limit_mib", "force_download"}:
             raise WebError("INVALID_REQUEST")
-        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib))
+        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib), force_download=body.get("force_download", False))
+
+    @app.post("/api/jobs/{job_id}/restore")
+    async def restore_record(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        return store.restore(job_id)
 
     @app.post("/api/jobs/{job_id}/retry", status_code=202)
     async def retry_job(job_id: str, request: Request):

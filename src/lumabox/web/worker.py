@@ -30,6 +30,11 @@ class AttemptFailure(WebError):
         self.result = result
 
 
+class DuplicateResult(Exception):
+    def __init__(self, target_id):
+        self.target_id = target_id
+
+
 class JobWorker:
     def __init__(self, config, store):
         self.config, self.store = config, store
@@ -97,6 +102,11 @@ class JobWorker:
             try:
                 self._run_attempt(job)
                 break
+            except DuplicateResult as duplicate:
+                cleaned = self.store.try_cleanup(job["id"])
+                if not cleaned or not self.store.mark_duplicate(job["id"], duplicate.target_id):
+                    self.store.fail(job["id"], "INTERRUPTED" if self.store.is_cancelling(job["id"]) else "VERIFY_FAILED")
+                break
             except AttemptFailure as exc:
                 cleaned = self.store.try_cleanup(job["id"])
                 if self.stopping.is_set() or self.store.is_cancelling(job["id"]):
@@ -153,7 +163,8 @@ class JobWorker:
                             raise WebError("STORAGE_FULL")
                         snapshot = self._read_progress(progress_path)
                         if snapshot is not None and snapshot != last_progress:
-                            self.store.update_progress(job["id"], snapshot)
+                            if self.store.update_progress(job["id"], snapshot):
+                                self._check_duplicate(job, snapshot)
                             last_progress = snapshot
             if self.stopping.is_set():
                 raise WebError("INTERRUPTED")
@@ -170,6 +181,7 @@ class JobWorker:
                 raise WebError(code if code in ERRORS else "DOWNLOAD_FAILED")
             self.store.update_progress(job["id"], {**(last_progress or {}), "stage": "publication", "resource_index": None})
             files = self._verify(job, directory, result)
+            self._check_duplicate(job, result)
             if self.config.capacity_bytes is not None and self.store.usage() > self.config.capacity_bytes:
                 raise WebError("STORAGE_FULL")
             self.store.update_progress(job["id"], {"stage": "publication", "work_id": result["work_id"],
@@ -182,9 +194,17 @@ class JobWorker:
                 except OSError:
                     pass  # Private auxiliary files are not part of publication.
             self.store.finish(job["id"], result, files)
+        except DuplicateResult:
+            raise
         except Exception as exc:
             code = exc.code if isinstance(exc, WebError) and exc.code in ERRORS else "VERIFY_FAILED"
             raise AttemptFailure(code, result) from None
+
+    def _check_duplicate(self, job, identity):
+        if identity.get("work_id") and identity.get("kind"):
+            match = self.store.check_duplicate(job["id"], identity["work_id"], identity["kind"])
+            if match:
+                raise DuplicateResult(match["id"])
 
     def _check_cancelled(self, job_id):
         if self.store.is_cancelling(job_id):

@@ -22,6 +22,7 @@ from ..progress import sanitize_snapshot
 from ..diagnostics import public_diagnostics
 from .config import WebConfig, WebError, is_link
 from .retry_policy import MAX_ATTEMPTS, RETRY_DELAY_SECONDS, should_retry
+from .duplicates import DuplicateWorkError, available, find_match
 
 ID = re.compile(r"[0-9a-f]{32}")
 
@@ -58,9 +59,14 @@ class JobStore:
                                      ("started_at", "REAL"), ("hidden_at", "REAL"),
                                      ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
                                      ("retry_at", "REAL"), ("deadline_at", "REAL"),
-                                     ("attempts", "TEXT NOT NULL DEFAULT '[]'")):
+                                     ("attempts", "TEXT NOT NULL DEFAULT '[]'"),
+                                     ("force_download", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("duplicate_of", "TEXT"),
+                                     ("storage_state", "TEXT NOT NULL DEFAULT 'present'")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_work ON jobs(work_id,kind)")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_url ON jobs(url)")
             previous = db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()
             self.previous_output = Path(previous[0]) if previous else config.data_dir / "outputs"
 
@@ -75,7 +81,10 @@ class JobStore:
             finally:
                 db.close()
 
-    def create(self, text: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB, *, retry_of: str | None = None) -> dict:
+    def create(self, text: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB, *, retry_of: str | None = None,
+               force_download: bool = False) -> dict:
+        if type(force_download) is not bool:
+            raise WebError("INVALID_REQUEST")
         if not isinstance(text, str) or not 1 <= len(text) <= 4096:
             raise WebError("INVALID_INPUT")
         try:
@@ -89,12 +98,15 @@ class JobStore:
         job_id, now = uuid.uuid4().hex, time.time()
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT count(*) FROM jobs WHERE status='pending'").fetchone()[0] >= 10:
-                raise WebError("QUEUE_FULL", 409)
             if retry_of and db.execute("SELECT 1 FROM jobs WHERE retry_of=? AND status IN ('pending','running','retry_wait','cancelling')", (retry_of,)).fetchone():
                 raise WebError("ALREADY_QUEUED", 409)
-            db.execute("INSERT INTO jobs (id,url,work_id,kind,status,created_at,updated_at,video_limit_mib,retry_of) VALUES (?,?,?,?,?,?,?,?,?)",
-                       (job_id, url, link.work_id, link.kind, "pending", now, now, video_limit_mib, retry_of))
+            match = find_match(self, db, url=url, work_id=link.work_id, kind=link.kind, force_download=force_download)
+            if match:
+                raise DuplicateWorkError(match)
+            if db.execute("SELECT count(*) FROM jobs WHERE status='pending'").fetchone()[0] >= 10:
+                raise WebError("QUEUE_FULL", 409)
+            db.execute("INSERT INTO jobs (id,url,work_id,kind,status,created_at,updated_at,video_limit_mib,retry_of,force_download) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (job_id, url, link.work_id, link.kind, "pending", now, now, video_limit_mib, retry_of, int(force_download)))
         return self.get(job_id)
 
     def retry(self, job_id: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB) -> dict:
@@ -102,9 +114,45 @@ class JobStore:
         with self.lock:
             with self.connection() as db:
                 row = db.execute("SELECT url,status FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row["status"] not in ("failed", "expired", "cancelled"):
+            if row["status"] not in ("failed", "expired", "cancelled", "duplicate"):
                 raise WebError("NOT_RETRYABLE", 409)
             return self.create(row["url"], video_limit_mib, retry_of=job_id)
+
+    def check_duplicate(self, job_id, work_id, kind):
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND status='running'", (job_id,)).fetchone()
+            if row is None or (row["work_id"] and (row["work_id"] != work_id or row["kind"] != kind)):
+                return None
+            return find_match(self, db, url=row["url"], work_id=work_id, kind=kind,
+                              exclude_id=job_id, force_download=bool(row["force_download"]))
+
+    def mark_duplicate(self, job_id, target_id):
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND status='running'", (job_id,)).fetchone()
+            target = db.execute("SELECT * FROM jobs WHERE id=?", (target_id,)).fetchone()
+            if row is None or target is None:
+                return False
+            match = find_match(self, db, url=row["url"], work_id=target["work_id"], kind=target["kind"],
+                               exclude_id=job_id, force_download=bool(row["force_download"]))
+            if not match or match["id"] != target_id or (row["work_id"] and
+                    (row["work_id"] != target["work_id"] or row["kind"] != target["kind"])):
+                return False
+            db.execute("UPDATE jobs SET status='duplicate',duplicate_of=?,work_id=?,kind=?,title=?,error=NULL,error_detail='{}',updated_at=? WHERE id=?",
+                       (target_id, target["work_id"], target["kind"], target["title"], time.time(), job_id))
+            return True
+
+    def restore(self, job_id):
+        if not isinstance(job_id, str) or not ID.fullmatch(job_id):
+            raise WebError("NOT_FOUND", 404)
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise WebError("NOT_FOUND", 404)
+            if row["status"] != "success" or row["storage_state"] != "present" or not available(self, db, job_id):
+                raise WebError("RESULT_UNAVAILABLE", 409)
+            db.execute("UPDATE jobs SET hidden_at=NULL WHERE id=?", (job_id,))
+        return self.get(job_id)
 
     def claim(self) -> dict | None:
         with self.connection() as db:
@@ -170,10 +218,11 @@ class JobStore:
                           title=normalize_title(row["title"]), progress=json.loads(row["progress"] or "{}"))
             result.update(attempt_count=row["attempt_count"], max_attempts=MAX_ATTEMPTS,
                           retry_at=row["retry_at"], attempts=json.loads(row["attempts"] or "[]"))
+            result.update(duplicate_of=row["duplicate_of"], storage_state=row["storage_state"])
             if row["started_at"] is not None:
                 end = time.time() if row["status"] in ("running", "cancelling", "retry_wait") else row["updated_at"]
                 result["progress"]["elapsed_seconds"] = max(0, int(end - row["started_at"]))
-            if row["status"] == "success":
+            if row["status"] == "success" and row["storage_state"] == "present":
                 result["files"] = [self.public_file(f) for f in db.execute("SELECT * FROM files WHERE job_id=? ORDER BY rowid", (job_id,))]
                 first = db.execute("SELECT relative_path FROM files WHERE job_id=? ORDER BY rowid LIMIT 1", (job_id,)).fetchone()
                 if first:
@@ -190,7 +239,7 @@ class JobStore:
 
     def search(self, q="", status="all", page=1, page_size=20) -> dict:
         if (not isinstance(q, str) or len(q) > 200 or
-                status not in ("all", "pending", "running", "retry_wait", "cancelling", "cancelled", "success", "failed", "expired") or
+                status not in ("all", "pending", "running", "retry_wait", "duplicate", "cancelling", "cancelled", "success", "failed", "expired") or
                 type(page) is not int or not 1 <= page <= 1_000_000 or
                 type(page_size) is not int or not 1 <= page_size <= 100):
             raise WebError("INVALID_REQUEST")

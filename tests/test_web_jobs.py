@@ -24,9 +24,9 @@ def test_queue_limit_fifo_and_running_is_not_pending(config):
     store = JobStore(config)
     first = store.create(URL)
     assert store.claim()["id"] == first["id"]
-    queued = [store.create(URL) for _ in range(10)]
+    queued = [store.create(f"https://www.douyin.com/video/{7686430330920075250 + i}") for i in range(10)]
     with pytest.raises(WebError, match="QUEUE_FULL"):
-        store.create(URL)
+        store.create("https://www.douyin.com/video/7686430330920075269")
     assert store.claim() is None  # single running job enforced in storage too
     store.fail(first["id"], "INTERRUPTED")
     assert store.claim()["id"] == queued[0]["id"]
@@ -47,7 +47,7 @@ def test_restart_fails_interrupted_job_but_keeps_pending(config):
     store = JobStore(config)
     active = store.create(URL)
     store.claim()
-    waiting = store.create(URL)
+    waiting = store.create("https://v.douyin.com/following/")
     reopened = JobStore(config)
     reopened.recover()
     assert reopened.get(active["id"])["error"] == "INTERRUPTED"
@@ -148,7 +148,7 @@ def test_expiry_removes_only_completed_job_and_disables_file(config, tmp_path, m
     job = store.create(URL)
     fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
     file_id = store.get(job["id"])["files"][0]["id"]
-    pending = store.create(URL)
+    pending = store.create(URL, force_download=True)
     store.expire(now=time.time() + 86401)
     assert store.get(job["id"])["status"] == "expired"
     assert store.get(pending["id"])["status"] == "pending"
@@ -203,7 +203,7 @@ def test_cleanup_failure_is_retried_without_stranding_queue(config, tmp_path, me
         original_cleanup(job_id)
     monkeypatch.setattr(store, "cleanup", temporarily_locked)
     store.expire(now=future)
-    next_job = store.create(URL)
+    next_job = store.create(URL, force_download=True)
     fixture_worker(config, store, tmp_path, media_fixtures[0]).run_once()
     assert store.get(next_job["id"])["status"] == "success"
     monkeypatch.setattr(store, "cleanup", original_cleanup)

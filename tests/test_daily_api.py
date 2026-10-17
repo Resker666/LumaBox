@@ -41,7 +41,7 @@ def routed_client(config):
 
 
 def completed(store, fixture, title="测试作品"):
-    job = store.create(URL)
+    job = store.create(URL, force_download=True)
     claimed = store.claim()
     assert claimed and claimed["id"] == job["id"]
     directory = store.config.output_dir / job["id"] / (WORK_ID + "-" + "a" * 32)
@@ -170,9 +170,9 @@ def test_clear_failed_and_active_removal_keep_success_and_pending(tmp_path, medi
     store = JobStore(WebConfig(tmp_path / "data"))
     success, path, data = completed(store, media_fixtures[0])
     for _ in range(3):
-        job = store.create(URL)
+        job = store.create(URL, force_download=True)
         store.fail(job["id"], "DOWNLOAD_FAILED")
-    pending = store.create(URL)
+    pending = store.create(URL, force_download=True)
     with routed_client(store.config) as client:
         with store.connection() as db:
             db.execute("UPDATE jobs SET status='pending' WHERE id=?", (pending["id"],))
