@@ -1,0 +1,30 @@
+<!doctype html><html><head><style>
+.basePlayerContainer {width:400px;height:200px;overflow:hidden}
+.track {display:flex;width:400px;height:200px}
+.dySwiperSlide {flex:0 0 400px;height:200px;position:relative}
+.dySwiperSlide > div {position:absolute;inset:0}
+</style></head><body>
+<main data-e2e="note-detail">
+ <div data-e2e="player-container" class="note-detail-container">
+  <div class="basePlayerContainer">
+   <xg-controls><xg-progress class="xgplayer-progress" data-index="0">
+    <xg-outer class="xgplayer-progress-outer picture"><xg-inners class="progress-list">
+     <xg-inner class="xgplayer-progress-inner picture-inner" style="flex:1">
+      <xg-cache class="xgplayer-progress-cache"></xg-cache><xg-played class="xgplayer-progress-played"></xg-played>
+     </xg-inner>
+    </xg-inners></xg-outer>
+   </xg-progress></xg-controls>
+   <div class="focusPanel"><div class="track">
+    <div class="dySwiperSlide">
+     <button type="button"></button>
+     <div><img class="o0KibnKo" src="https://p3.douyinpic.com/still.jpeg"><div><img src="https://p3.douyinpic.com/background.jpeg"></div></div>
+    </div>
+   </div></div>
+   <xg-video-container class="xg-video-container hideXgVideo"><video hidden src="https://v1.douyinvod.com/background-music.mp4"></video></xg-video-container>
+  </div>
+ </div>
+ <aside class="noteSideBarContainer"><div data-e2e="feed-active-video" data-e2e-vid="7697415943497351346">当前作品</div></aside>
+ <p data-e2e="note-desc">单张静态图文</p>
+</main>
+<div class="detailrelatedVideoCard"><video src="https://v1.douyinvod.com/recommendation.mp4"></video></div>
+</body></html>

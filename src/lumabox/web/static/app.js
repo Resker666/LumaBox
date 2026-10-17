@@ -1,8 +1,9 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const labels = { pending: "待下载", running: "下载中", cancelling: "正在取消", cancelled: "已取消", success: "已完成", failed: "未完成", expired: "已过期" };
+const labels = { pending: "待下载", running: "下载中", retry_wait: "等待重试", duplicate: "已有收藏", cancelling: "正在取消", cancelled: "已取消", success: "已完成", failed: "未完成", expired: "已过期" };
 const stages = { browser_start: "启动浏览器", browser_load: "读取作品", media_transfer: "下载媒体", media_verification: "检查文件", publication: "整理收藏" };
 const failures = {
+  CLEANUP_FAILED: "临时文件未能清理，已停止自动重试，请检查保存位置。",
   AUTH_REQUIRED: "此作品需要登录后访问，暂时无法下载。",
   CHALLENGE_REQUIRED: "页面要求访问验证，暂时无法下载。",
   UNSAFE_TARGET: "网络地址校验未通过，请检查网络后重试。",
@@ -62,7 +63,7 @@ async function api(path, body) {
   catch { throw new Error("暂时无法连接光匣，请稍后重试。"); }
   const data = await response.json();
   if (response.status === 401 && data.error === "LOGIN_REQUIRED") window.location.replace("/login");
-  if (!response.ok) throw new Error(data.message || "暂时无法完成请求，请稍后重试。");
+  if (!response.ok) throw Object.assign(new Error(data.message || "暂时无法完成请求，请稍后重试。"), { code: data.error, existing: data.existing });
   return data;
 }
 
@@ -158,6 +159,39 @@ async function addJob() {
   notice("submit-success", remoteMode ? "已加入光匣，完成后可下载到本机。" : "已加入光匣，完成后自动保存在本机。");
 }
 
+async function showExisting(id, restore = false) {
+  const job = restore ? await api(`/api/jobs/${encodeURIComponent(id)}/restore`, {}) : await api(`/api/jobs/${encodeURIComponent(id)}`);
+  $("existing-card").replaceChildren(buildCard(job));
+  if (!$("existing-dialog").open) $("existing-dialog").showModal();
+  await refreshJobs();
+  if (restore) window.dispatchEvent(new Event("lumabox:storage-changed"));
+}
+
+async function showDuplicate(job) {
+  const current = await api(`/api/jobs/${encodeURIComponent(job.id)}`);
+  const target = current.duplicate_target;
+  if (!target) throw new Error("已有收藏文件已不可用，可以重新下载。");
+  if (target.hidden && !job.duplicate_target?.hidden && !window.confirm("这份收藏的记录已移除。恢复并查看吗？")) return;
+  await showExisting(target.id, target.hidden);
+}
+
+function offerDuplicate(error, request) {
+  if (!error.existing) return false;
+  const existing = error.existing;
+  $("duplicate-message").textContent = error.message;
+  const controls = $("duplicate-actions");
+  controls.replaceChildren(action(existing.hidden ? "恢复并查看" : "查看已有任务", "preview-button", () => showExisting(existing.id, existing.hidden)));
+  if (existing.match_type === "saved") controls.append(action("重新下载", "retry-button", async () => {
+    if (!window.confirm("重新下载会保留已有文件，并额外占用空间。继续吗？")) return;
+    await api("/api/jobs", { ...request, force_download: true });
+    $("duplicate-notice").hidden = true;
+    if ($("work-input").value.trim() === request.input) $("work-input").value = "";
+    await addJob();
+  }));
+  $("duplicate-notice").hidden = false;
+  return true;
+}
+
 function buildCard(job) {
   const gallery = job.kind === "gallery";
   const card = element("article", "job-card");
@@ -169,10 +203,13 @@ function buildCard(job) {
   body.append(top);
   const date = new Date(job.created_at * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   body.append(element("p", "job-meta", `${date} 添加${job.title && job.work_id ? ` · 作品 ID ${job.work_id}` : ""}`));
+  if (job.attempt_count) body.append(element("p", "job-meta", `第 ${job.attempt_count} / ${job.max_attempts || 2} 次尝试`));
   if (job.source_url) body.append(element("p", "job-source", job.source_url));
   let detail = "";
   if (job.status === "running") detail = progressText(job);
   if (job.status === "pending") detail = "已加入队列，稍后开始。";
+  if (job.status === "retry_wait") detail = `${failureText(job)} ${Math.max(0, Math.ceil(job.retry_at - Date.now() / 1000))} 秒后自动重试，可随时取消。`;
+  if (job.status === "duplicate") detail = job.duplicate_target ? "此作品已有收藏，本次未保留重复文件。" : "已有收藏文件已不可用，可以重新下载。";
   if (job.status === "cancelling") detail = "正在停止下载并清理未完成文件，请稍候。";
   if (job.status === "cancelled") detail = "下载已取消。需要时可以重新下载。";
   if (job.status === "expired") detail = "旧版临时文件已过期，可以重新保存此作品。";
@@ -182,8 +219,15 @@ function buildCard(job) {
     const motions = gallery ? media.filter((file) => file.mime === "video/mp4").length : 0;
     const description = gallery ? `${job.actual_count} 张图片${motions ? ` · ${motions} 段动态片段` : ""}` : "完整视频";
     detail = `${description} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
+    if (job.storage_state !== "present") detail = "文件删除尚未完成，请到文件管理中处理。";
   }
   if (detail) body.append(element("p", `job-detail ${job.status}`, detail));
+  if (job.attempts?.length) {
+    const log = element("details", "attempt-log");
+    log.append(element("summary", "", "尝试记录"));
+    for (const attempt of job.attempts) log.append(element("p", "job-meta", `第 ${attempt.number} 次：${attempt.error ? failureText({error: attempt.error, error_detail: attempt.detail}) : "文件检查通过"}`));
+    body.append(log);
+  }
   if (job.status === "failed" && networkFailures[job.error_detail?.network_reason]) {
     const locations = { dns_resolution: "域名解析", page_navigation: "读取作品页面", media_transfer: "下载媒体" };
     const location = [locations[job.error_detail.stage], job.error_detail.host].filter(Boolean).join(" · ");
@@ -198,11 +242,11 @@ function buildCard(job) {
     body.append(meter);
   }
   const controls = element("div", "job-controls");
-  if (["pending", "running"].includes(job.status)) controls.append(action("取消下载", "cancel-button", async () => {
+  if (["pending", "running", "retry_wait"].includes(job.status)) controls.append(action("取消下载", "cancel-button", async () => {
     await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, {});
     await refreshJobs();
   }, "cancel"));
-  if (job.status === "success") {
+  if (job.status === "success" && job.storage_state === "present") {
     if (job.output_directory) body.append(element("p", "job-path", `${remoteMode ? "服务器保存位置" : "保存位置"}：${job.output_directory}`));
     const media = job.files.filter((file) => ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime));
     if (media.length) controls.append(action(gallery ? "预览图集" : "预览视频", "preview-button", () => openPreview(job), "preview"));
@@ -236,14 +280,17 @@ function buildCard(job) {
     extra.append(links);
     if (!remoteMode || gallery) controls.append(extra);
   }
-  if (["failed", "expired", "cancelled"].includes(job.status)) controls.append(action(job.status === "cancelled" ? "重新下载" : "一键重试", "retry-button", async () => {
-    await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { video_limit_mib: selectedLimit() });
-    await addJob();
+  if (job.status === "duplicate" && job.duplicate_target) controls.append(action(job.duplicate_target.hidden ? "恢复并查看" : "查看已有收藏", "preview-button", () => showDuplicate(job)));
+  if (["failed", "expired", "cancelled", "duplicate"].includes(job.status)) controls.append(action(job.status === "cancelled" ? "重新下载" : "一键重试", "retry-button", async () => {
+    const request = { input: job.source_url, video_limit_mib: selectedLimit() };
+    try { await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { video_limit_mib: request.video_limit_mib }); await addJob(); }
+    catch (error) { if (!offerDuplicate(error, request)) throw error; }
   }, "retry"));
-  if (["success", "failed", "expired", "cancelled"].includes(job.status)) controls.append(action("移除记录", "remove-button", async () => {
+  if (["success", "failed", "expired", "cancelled", "duplicate"].includes(job.status)) controls.append(action("移除记录", "remove-button", async () => {
     if (!window.confirm(`移除这条收藏记录？已保存的文件会保留在${remoteMode ? "服务器" : "电脑"}上。`)) return;
     await api(`/api/jobs/${encodeURIComponent(job.id)}/remove`, {});
     await refreshJobs();
+    window.dispatchEvent(new Event("lumabox:storage-changed"));
   }, "remove"));
   if (controls.childElementCount) body.append(controls);
   card.append(body);
@@ -268,9 +315,12 @@ function renderJobs() {
     let entry = cards.get(job.id);
     if (!entry || entry.signature !== signature) {
       const node = buildCard(job);
-      const expanded = entry?.node.querySelector("details")?.open;
+      const expanded = [...(entry?.node.querySelectorAll("details") || [])].filter((item) => item.open).map((item) => item.className);
       const focusKey = entry?.node.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
-      if (expanded && node.querySelector("details")) node.querySelector("details").open = true;
+      for (const className of expanded) {
+        const detail = [...node.querySelectorAll("details")].find((item) => item.className === className);
+        if (detail) detail.open = true;
+      }
       if (entry) entry.node.replaceWith(node);
       entry = { node, signature };
       cards.set(job.id, entry);
@@ -287,6 +337,7 @@ async function refreshJobs() {
   try {
     const result = await api(`/api/jobs?${query}`);
     if (version !== requestVersion) return;
+    const previousStates = new Map(jobs.map((job) => [job.id, job.status]));
     jobs = result.jobs;
     total = result.total;
     history.page = result.page;
@@ -295,6 +346,7 @@ async function refreshJobs() {
       return refreshJobs();
     }
     renderJobs();
+    if (jobs.some((job) => ["success", "failed", "cancelled", "duplicate"].includes(job.status) && previousStates.get(job.id) !== job.status)) window.dispatchEvent(new Event("lumabox:storage-changed"));
     notice("connection-error", "");
   } catch {
     if (version === requestVersion) notice("connection-error", "连接暂时中断，正在尝试重新连接…");
@@ -378,6 +430,7 @@ function changePage(offset) {
 }
 
 $("close-preview").addEventListener("click", () => $("preview-dialog").close());
+$("close-existing").addEventListener("click", () => $("existing-dialog").close());
 $("preview-dialog").addEventListener("close", releasePreview);
 $("preview-dialog").addEventListener("keydown", (event) => {
   if (preview?.kind === "gallery" && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
@@ -408,6 +461,7 @@ $("clear-failed").addEventListener("click", async () => {
   notice("action-error", "");
   try {
     const result = await api("/api/jobs/clear-failed", {});
+    window.dispatchEvent(new Event("lumabox:storage-changed"));
     await refreshJobs();
     notice("submit-success", `已清理 ${result.removed} 条失败记录，已保存的文件保留在${remoteMode ? "服务器" : "电脑"}上。`);
   } catch (error) { notice("action-error", error.message); }
@@ -418,11 +472,14 @@ $("job-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   $("submit-button").disabled = true;
   notice("submit-error", ""); notice("submit-success", "");
+  $("duplicate-notice").hidden = true;
+  let request;
   try {
-    await api("/api/jobs", { input: $("work-input").value.trim(), video_limit_mib: selectedLimit() });
+    request = { input: $("work-input").value.trim(), video_limit_mib: selectedLimit() };
+    await api("/api/jobs", request);
     $("work-input").value = "";
     await addJob();
-  } catch (error) { notice("submit-error", error.message); }
+  } catch (error) { if (!request || !offerDuplicate(error, request)) notice("submit-error", error.message); }
   finally { $("submit-button").disabled = false; }
 });
 
@@ -446,6 +503,7 @@ async function start() {
     updateLimit();
     $("submit-button").disabled = false;
     $("clear-failed").disabled = false;
+    window.LumaBoxStorage.init({ request: api, formatSize: size, onChanged: refreshJobs });
     notice("connection-error", "");
     poll();
   } catch {

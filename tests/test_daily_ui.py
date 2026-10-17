@@ -100,7 +100,8 @@ def test_history_search_status_pagination_and_submission_resets_view(daily_serve
         expect(page.get_by_label("搜索收藏")).to_have_value("")
         expect(page.get_by_label("任务状态")).to_have_value("all")
         expect(page.locator("#page-info")).to_have_text("第 1 / 2 页")
-        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_have_count(2, timeout=12000)
+        expect(page.locator("#job-list").get_by_text("已有收藏", exact=True)).to_have_count(1, timeout=12000)
+        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_have_count(1)
         screenshot(page, "history-desktop.png")
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     finally:
@@ -159,7 +160,7 @@ def test_video_preview_uses_range_seek_and_survives_polling(daily_server, browse
         preview_button.focus()
         failed_job(worker.store, "7686430330920075201")
         expect(page.locator("#job-list").get_by_text("未完成", exact=True)).to_be_visible(timeout=6000)
-        assert page.locator("details").evaluate("node => node.open")
+        assert page.locator("details.save-extra").evaluate("node => node.open")
         expect(preview_button).to_be_focused()
         preview_button.click()
         dialog = page.get_by_role("dialog")

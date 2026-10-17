@@ -98,7 +98,8 @@ def test_desktop_direct_use_limits_save_folder_download_and_retry(server, browse
         expect(page.get_by_text("作品 · 未识别作品", exact=True)).to_be_visible()
         worker.mode = "success"
         page.get_by_role("button", name="一键重试", exact=True).click()
-        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_have_count(2, timeout=10000)
+        expect(page.locator("#job-list").get_by_text("已有收藏", exact=True)).to_have_count(1, timeout=10000)
+        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_have_count(1)
         screenshot(page, "tasks-desktop.png")
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         jobs = page.request.get(url + "/api/jobs").json()["jobs"]

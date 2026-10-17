@@ -1,21 +1,29 @@
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from starlette.background import BackgroundTask
-from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from .. import __version__
 from .config import WebConfig, WebError
 from .folders import open_folder
-from .media import preview_response
+from .media import preview_response, LeasedResponse
 from .store import JobStore
 from .worker import JobWorker
 from .access import CloudAccess, AccessBoundary, COOKIE
+from .duplicates import DuplicateWorkError
 
 MESSAGES = {
+    "FILE_IN_USE": "文件正在下载或预览，请停止预览或等待传输完成后再删除。",
+    "UNSAFE_DELETE": "目录包含无法确认归属的内容或链接，未执行删除，请检查保存位置。",
+    "OUTPUT_CHANGED": "此删除任务属于旧保存目录，请切回原目录后处理。",
+    "DELETE_FAILED": "文件尚未全部删除，请检查权限后在文件管理中重试。",
+    "ALREADY_DOWNLOADING": "此作品已在队列中，请查看已有任务。",
+    "DUPLICATE_WORK": "此作品已经保存，可查看已有收藏或选择重新下载。",
+    "RESULT_UNAVAILABLE": "已保存的文件不可用，可重新下载此作品。",
     "FORBIDDEN": "请求校验失败，请刷新页面重试。",
     "INVALID_REQUEST": "请求格式不正确。", "BODY_TOO_LARGE": "提交内容过长，请缩短后重试。",
     "JSON_REQUIRED": "请提交 JSON 格式的请求。", "INVALID_INPUT": "请粘贴一条抖音视频或图集链接。",
@@ -28,7 +36,10 @@ MESSAGES = {
 
 
 def error_response(error: WebError):
-    return JSONResponse({"error": error.code, "message": MESSAGES.get(error.code, MESSAGES["SERVER_ERROR"])}, status_code=error.status)
+    body = {"error": error.code, "message": MESSAGES.get(error.code, MESSAGES["SERVER_ERROR"])}
+    if isinstance(error, DuplicateWorkError):
+        body["existing"] = error.existing
+    return JSONResponse(body, status_code=error.status)
 
 
 class LocalBoundary:
@@ -155,9 +166,45 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
         if worker.stopping.is_set():
             raise WebError("SERVER_ERROR", 503)
         body = await object_body(request)
-        if "input" not in body or set(body) - {"input", "video_limit_mib"}:
+        if "input" not in body or set(body) - {"input", "video_limit_mib", "force_download"}:
             raise WebError("INVALID_REQUEST")
-        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib))
+        return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib), force_download=body.get("force_download", False))
+
+    @app.get("/api/storage")
+    def storage_summary(request: Request):
+        query = request.query_params
+        if set(query) - {"refresh"} or query.get("refresh", "0") not in {"0", "1"}:
+            raise WebError("INVALID_REQUEST")
+        return store.storage.summary(refresh=query.get("refresh") == "1")
+
+    @app.get("/api/storage/items")
+    def storage_items(request: Request):
+        query = request.query_params
+        try:
+            if set(query) - {"scope", "page", "page_size"}:
+                raise ValueError
+            page, size = int(query.get("page", "1")), int(query.get("page_size", "20"))
+        except ValueError:
+            raise WebError("INVALID_REQUEST") from None
+        return store.storage.items(scope=query.get("scope", "all"), page=page, page_size=size)
+
+    @app.post("/api/jobs/{job_id}/restore")
+    async def restore_record(job_id: str, request: Request):
+        write_guard(request)
+        if await object_body(request):
+            raise WebError("INVALID_REQUEST")
+        return store.restore(job_id)
+
+    @app.post("/api/jobs/{job_id}/purge")
+    async def purge_record(job_id: str, request: Request):
+        write_guard(request)
+        body = await object_body(request)
+        if set(body) != {"confirm"} or body.get("confirm") is not True:
+            raise WebError("INVALID_REQUEST")
+        result = store.storage.purge(job_id)
+        if result["status"] != "deleted":
+            result["message"] = MESSAGES["DELETE_FAILED"]
+        return result
 
     @app.post("/api/jobs/{job_id}/retry", status_code=202)
     async def retry_job(job_id: str, request: Request):
@@ -219,13 +266,14 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
     def download(file_id: str, request: Request):
         lease = store.open_file(file_id)
         file, stream = lease.__enter__()
-        released = False
+        released, release_lock = False, threading.Lock()
 
         def release():
             nonlocal released
-            if not released:
-                released = True
-                lease.__exit__(None, None, None)
+            with release_lock:
+                if not released:
+                    released = True
+                    lease.__exit__(None, None, None)
 
         def chunks():
             try:
@@ -234,9 +282,9 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
             finally:
                 release()
 
-        return StreamingResponse(chunks(), media_type=file["mime"], headers={
+        return LeasedResponse(chunks(), release=release, media_type=file["mime"], headers={
             "Content-Length": str(file["bytes"]), "Content-Disposition": f'attachment; filename="{file["name"]}"'},
-            background=BackgroundTask(release))
+        )
 
     static = Path(__file__).parent / "static"
 
