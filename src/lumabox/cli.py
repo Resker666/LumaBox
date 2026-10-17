@@ -29,5 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         result = asyncio.run(run_download(args.input, args.output, args.headless, **options))
     except KeyboardInterrupt:
         result = {"status": "failed", "error": "INTERRUPTED"}
-    print(json.dumps(result, ensure_ascii=False))
+    # ASCII JSON is also valid UTF-8, independent of the Windows console locale.
+    # Escapes preserve Chinese titles, emoji and paths when the worker decodes it.
+    print(json.dumps(result, ensure_ascii=True))
     return 0 if result["status"] == "success" else 130 if result.get("error") == "INTERRUPTED" else 1

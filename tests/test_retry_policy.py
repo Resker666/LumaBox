@@ -20,7 +20,7 @@ def test_retry_only_recognized_transient_failure(error, detail, want):
 
 @pytest.mark.parametrize("error", ["AUTH_REQUIRED", "CHALLENGE_REQUIRED", "BLOCKED", "RATE_LIMITED",
     "NOT_FOUND", "SIZE_LIMIT", "STORAGE_FULL", "UNSUPPORTED_MEDIA", "PARSE_CHANGED", "VERIFY_FAILED",
-    "DEPENDENCY_MISSING", "INTERRUPTED", "TIMEOUT"])
+    "DEPENDENCY_MISSING", "INTERRUPTED", "TIMEOUT", "RESULT_PARSE_FAILED"])
 def test_terminal_errors_override_transient_diagnostics(error):
     from lumabox.web.retry_policy import should_retry
     assert not should_retry(error, {"network_reason": "CONNECTION_TIMEOUT", "stage": "media_transfer"})

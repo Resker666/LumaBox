@@ -128,7 +128,7 @@ def test_nonobject_cli_report_fails_without_stranding_queue(web_config, tmp_path
     worker = fixture_worker(web_config, store, tmp_path, media_fixtures[0])
     worker.script.write_text("print('[]')", encoding="utf-8")
     assert worker.run_once()
-    assert store.get(first["id"])["error"] == "VERIFY_FAILED"
+    assert store.get(first["id"])["error"] == "RESULT_PARSE_FAILED"
     second = store.create(URL)
     fixture_worker(web_config, store, tmp_path, media_fixtures[0]).run_once()
     assert store.get(second["id"])["status"] == "success"

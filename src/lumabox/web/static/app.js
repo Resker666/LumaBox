@@ -14,6 +14,7 @@ const failures = {
   TIMEOUT: "任务超过等待时间，请稍后重试。",
   UNSUPPORTED_MEDIA: "暂时无法确认这条作品的完整媒体。",
   PARSE_CHANGED: "作品页面发生变化，暂时无法读取。",
+  RESULT_PARSE_FAILED: "下载结果读取失败，请重试；此错误不代表媒体文件损坏。",
   VERIFY_FAILED: "文件完整性检查未通过，请重新下载。",
   STORAGE_FULL: "磁盘空间不足，请释放空间或调低视频上限。",
   DEPENDENCY_MISSING: "下载组件尚未安装完整，请检查安装说明。",

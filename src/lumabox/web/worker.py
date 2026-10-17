@@ -21,7 +21,7 @@ from .retry_policy import should_retry
 ERRORS = frozenset({"INVALID_INPUT", "UNSAFE_TARGET", "AUTH_REQUIRED", "BLOCKED", "NOT_FOUND",
                     "RATE_LIMITED", "UNSUPPORTED_MEDIA", "PARSE_CHANGED", "VERIFY_FAILED", "SIZE_LIMIT",
                     "DEPENDENCY_MISSING", "INTERRUPTED", "DOWNLOAD_FAILED", "TIMEOUT", "STORAGE_FULL",
-                    "CHALLENGE_REQUIRED", "RESOURCE_TIMEOUT", "CLEANUP_FAILED"})
+                    "CHALLENGE_REQUIRED", "RESOURCE_TIMEOUT", "CLEANUP_FAILED", "RESULT_PARSE_FAILED"})
 
 
 class AttemptFailure(WebError):
@@ -166,7 +166,7 @@ class JobWorker:
                             raise WebError("INTERRUPTED")
                         self._check_cancelled(job["id"])
                         if output.stat().st_size > 256 * 1024:
-                            raise WebError("VERIFY_FAILED")
+                            raise WebError("RESULT_PARSE_FAILED")
                         if self.config.capacity_bytes is not None and self.store.usage() > self.config.capacity_bytes:
                             raise WebError("STORAGE_FULL")
                         snapshot = self._read_progress(progress_path)
@@ -178,14 +178,17 @@ class JobWorker:
                 raise WebError("INTERRUPTED")
             self._check_cancelled(job["id"])
             if output.stat().st_size > 256 * 1024:
-                raise WebError("VERIFY_FAILED")
+                raise WebError("RESULT_PARSE_FAILED")
             snapshot = self._read_progress(progress_path)
             if snapshot is not None and snapshot != last_progress:
                 self.store.update_progress(job["id"], snapshot)
                 last_progress = snapshot
-            decoded = json.loads(output.read_bytes().splitlines()[-1])
+            try:
+                decoded = json.loads(output.read_bytes().splitlines()[-1])
+            except (ValueError, IndexError, RecursionError):
+                raise WebError("RESULT_PARSE_FAILED") from None
             if not isinstance(decoded, dict):
-                raise WebError("VERIFY_FAILED")
+                raise WebError("RESULT_PARSE_FAILED")
             result = decoded
             if process.returncode != 0 or result.get("status") != "success":
                 code = result.get("error")
