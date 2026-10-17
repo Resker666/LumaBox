@@ -78,3 +78,20 @@ def fixture_worker(config, store, tmp_path, fixture, mode="success"):
     script = tmp_path / "cli_fixture.py"
     script.write_text(CHILD, encoding="utf-8")
     return FixtureWorker(config, store, script, fixture, mode)
+
+
+def retry_worker(config, store, tmp_path, fixture, *, failures=1):
+    worker = fixture_worker(config, store, tmp_path, fixture)
+    prefix = f'''
+counter=Path({str(tmp_path / "attempt-count.txt")!r})
+attempt=int(counter.read_text())+1 if counter.exists() else 1
+counter.write_text(str(attempt))
+if attempt <= {failures}:
+    (root/'partial-marker').write_text('incomplete')
+    print(json.dumps({{'status':'failed','error':'DOWNLOAD_FAILED','diagnostics':{{
+        'network_reason':'CONNECTION_RESET','stage':'media_transfer','url':'private'}}}}))
+    sys.exit(1)
+assert not (root/'partial-marker').exists(), 'old attempt survived'
+'''
+    worker.script.write_text(CHILD.replace("root=Path(root)", "root=Path(root)\n" + prefix), encoding="utf-8")
+    return worker
