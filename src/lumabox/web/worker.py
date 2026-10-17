@@ -46,6 +46,7 @@ class JobWorker:
         self.instance = InstanceLock(self.config.data_dir)
         self.instance.__enter__()
         try:
+            self.store.storage.recover_deletions()
             self.store.migrate_outputs()
             self.store.recover()
             self.thread = threading.Thread(target=self._loop, name="lumabox-download", daemon=False)

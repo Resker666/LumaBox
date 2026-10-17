@@ -63,7 +63,8 @@ class JobStore:
                                      ("attempts", "TEXT NOT NULL DEFAULT '[]'"),
                                      ("force_download", "INTEGER NOT NULL DEFAULT 0"),
                                      ("duplicate_of", "TEXT"),
-                                     ("storage_state", "TEXT NOT NULL DEFAULT 'present'")):
+                                     ("storage_state", "TEXT NOT NULL DEFAULT 'present'"),
+                                     ("purge_root", "TEXT"), ("purge_manifest", "TEXT")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
             db.execute("CREATE INDEX IF NOT EXISTS jobs_work ON jobs(work_id,kind)")
@@ -362,7 +363,7 @@ class JobStore:
 
     def recover(self):
         with self.connection() as db:
-            ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling')")]
+            ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling') AND storage_state='present'")]
         for job_id in ids:
             self.fail(job_id, "INTERRUPTED")
             self.try_cleanup(job_id)
@@ -371,7 +372,7 @@ class JobStore:
         if not ID.fullmatch(file_id):
             raise WebError("NOT_FOUND", 404)
         with self.connection() as db:
-            row = db.execute("SELECT files.* FROM files JOIN jobs ON jobs.id=files.job_id WHERE files.id=? AND jobs.status='success' AND jobs.hidden_at IS NULL", (file_id,)).fetchone()
+            row = db.execute("SELECT files.* FROM files JOIN jobs ON jobs.id=files.job_id WHERE files.id=? AND jobs.status='success' AND jobs.hidden_at IS NULL AND jobs.storage_state='present'", (file_id,)).fetchone()
             if row is None:
                 raise WebError("NOT_FOUND", 404)
             return dict(row)
@@ -407,7 +408,7 @@ class JobStore:
         old, new = self.previous_output, self.config.output_dir
         if old != new:
             with self.connection() as db:
-                rows = [dict(row) for row in db.execute("SELECT files.* FROM files JOIN jobs ON files.job_id=jobs.id WHERE jobs.status='success'")]
+                rows = [dict(row) for row in db.execute("SELECT files.* FROM files JOIN jobs ON files.job_id=jobs.id WHERE jobs.status='success' AND jobs.storage_state='present'")]
             grouped = {}
             for row in rows:
                 grouped.setdefault(row["job_id"], []).append(row)
@@ -494,6 +495,10 @@ class JobStore:
     def cleanup(self, job_id: str):
         if not ID.fullmatch(job_id):
             raise WebError("INVALID_CONFIG")
+        with self.connection() as db:
+            row = db.execute("SELECT storage_state FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row and row["storage_state"] != "present":
+            raise WebError("UNSAFE_DELETE", 409)
         path = self.config.output_dir / job_id
         if not path.exists():
             return
@@ -527,13 +532,13 @@ class JobStore:
     def expire(self, now: float | None = None):
         if self.config.retention_seconds is None:
             with self.connection() as db:
-                failed = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('failed','cancelled')")]
+                failed = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('failed','cancelled') AND storage_state='present'")]
             for job_id in failed:
                 self.try_cleanup(job_id)
             return  # A local collection is permanent; only incomplete outputs are cleaned.
         now = time.time() if now is None else now
         with self.connection() as db:
-            ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE status IN ('success','failed','cancelled') AND updated_at<?",
+            ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE status IN ('success','failed','cancelled') AND storage_state='present' AND updated_at<?",
                                             (now - self.config.retention_seconds,))]
         for job_id in ids:
             with self.lock:
