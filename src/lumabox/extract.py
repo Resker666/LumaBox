@@ -5,7 +5,7 @@ from .models import Work, MediaResource
 from .metadata import normalize_title
 from .urls import https_parts, validate_media_url
 
-# Based on observed Douyin detail DOM on 2026-10-12/13/16. No application state is read.
+# Based on observed Douyin detail DOM on 2026-10-12/13/16/17. No application state is read.
 DOM_SNAPSHOT = r"""({work_id, kind}) => {
  const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
  const feedSelector = '[data-e2e="feed-active-video"][data-e2e-vid]';
@@ -63,9 +63,19 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
    const slides = Array.from(player.querySelectorAll('.dySwiperSlide'));
    // Observed single Live Photo detail pages omit 1/1 but explicitly hide the
    // one-item live progress control. A lone DOM slide alone proves no total.
-   const single = pairs.length === 0 && candidate.source === 'note_sidebar' &&
-     player.querySelectorAll('.xgplayer-progress.one-live-hide').length === 1 && slides.length === 1 &&
+   const scopedSingle = pairs.length === 0 && candidate.source === 'note_sidebar' && slides.length === 1;
+   const singleLive = scopedSingle && player.querySelectorAll('.xgplayer-progress.one-live-hide').length === 1 &&
      slides[0].querySelectorAll('video').length === 1;
+   // Static notes can omit 1/1 too. The picture progress list supplies a
+   // separate page count; do not infer completeness from one loaded slide.
+   const controls = Array.from(player.querySelectorAll('.xgplayer-progress'));
+   const pictureLists = controls.length === 1 && controls[0].matches('xg-progress[data-index="0"]')
+     ? controls[0].querySelectorAll(':scope > xg-outer.xgplayer-progress-outer.picture > xg-inners.progress-list') : [];
+   const singleStatic = scopedSingle && slides[0].querySelectorAll('video').length === 0 &&
+     pictureLists.length === 1 && pictureLists[0].children.length === 1 &&
+     pictureLists[0].firstElementChild.matches('xg-inner.xgplayer-progress-inner.picture-inner') &&
+     controls[0].querySelectorAll('xg-inner.picture-inner').length === 1;
+   const single = singleLive || singleStatic;
    if (pairs.length !== 1 && !single) return out;
    const [current, total] = single ? [1, 1] : pairs[0].split('/').map(Number);
    out.count = total;
