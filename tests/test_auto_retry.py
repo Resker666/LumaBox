@@ -132,3 +132,36 @@ def test_nonobject_cli_report_fails_without_stranding_queue(web_config, tmp_path
     second = store.create(URL)
     fixture_worker(web_config, store, tmp_path, media_fixtures[0]).run_once()
     assert store.get(second["id"])["status"] == "success"
+
+
+@pytest.mark.parametrize("action", ["remove", "purge"])
+def test_cancel_then_hide_retry_waiter_keeps_queue_alive(web_config, tmp_path, media_fixtures, monkeypatch, action):
+    import threading
+    store = JobStore(web_config); first = store.create(URL); store.claim()
+    assert store.schedule_retry(first["id"], "RESOURCE_TIMEOUT", {})
+    following = store.create("https://v.douyin.com/next-work/")
+    worker = fixture_worker(web_config, store, tmp_path, media_fixtures[0])
+    waiting, resume = threading.Event(), threading.Event()
+    original = worker._wait_retry
+    def pause(job):
+        waiting.set()
+        assert resume.wait(5)
+        return original(job)
+    monkeypatch.setattr(worker, "_wait_retry", pause)
+    worker.start()
+    try:
+        assert waiting.wait(5)
+        store.cancel(first["id"])
+        if action == "remove": store.remove(first["id"])
+        else: assert store.storage.purge(first["id"])["status"] == "deleted"
+        resume.set()
+        deadline = time.monotonic() + 5
+        while worker.thread.is_alive() and store.get(following["id"])["status"] == "pending" and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert worker.thread.is_alive(), "hiding a cancelled waiter killed the worker"
+        wait_state(store, following["id"], "success")
+        with store.connection() as db:
+            assert db.execute("SELECT attempt_count FROM jobs WHERE id=?", (first["id"],)).fetchone()[0] == 1
+    finally:
+        resume.set()
+        worker.stop()

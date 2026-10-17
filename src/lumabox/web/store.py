@@ -224,6 +224,12 @@ class JobStore:
             result.update(attempt_count=row["attempt_count"], max_attempts=MAX_ATTEMPTS,
                           retry_at=row["retry_at"], attempts=json.loads(row["attempts"] or "[]"))
             result.update(duplicate_of=row["duplicate_of"], storage_state=row["storage_state"])
+            if row["status"] == "duplicate":
+                target = db.execute("SELECT * FROM jobs WHERE id=?", (row["duplicate_of"],)).fetchone()
+                result["duplicate_target"] = (
+                    {"id": target["id"], "hidden": target["hidden_at"] is not None}
+                    if target and target["status"] == "success" and target["storage_state"] == "present"
+                    and available(self, db, target["id"]) else None)
             if row["started_at"] is not None:
                 end = time.time() if row["status"] in ("running", "cancelling", "retry_wait") else row["updated_at"]
                 result["progress"]["elapsed_seconds"] = max(0, int(end - row["started_at"]))
@@ -493,6 +499,11 @@ class JobStore:
             return False
 
     def cleanup(self, job_id: str):
+        # Keep lifecycle validation and deletion atomic with explicit purge.
+        with self.lock:
+            self._cleanup(job_id)
+
+    def _cleanup(self, job_id: str):
         if not ID.fullmatch(job_id):
             raise WebError("INVALID_CONFIG")
         with self.connection() as db:

@@ -124,6 +124,50 @@ def test_pending_job_cannot_be_purged(web_config):
     assert store.get(job["id"])["status"] == "pending"
 
 
+def test_automatic_cleanup_and_confirmed_purge_do_not_interleave(web_config, monkeypatch):
+    import threading
+    store = JobStore(web_config); job = store.create(URL)
+    store.fail(job["id"], "DOWNLOAD_FAILED")
+    directory = web_config.output_dir / job["id"]; directory.mkdir()
+    owned = directory / "cli-result.jsonl"; owned.write_text("partial")
+    checked, resume, purging, purged = [threading.Event() for _ in range(4)]
+    original_exists, original_unlink = Path.exists, Path.unlink
+    errors, results = [], []
+    def exists(path):
+        if path == directory and threading.current_thread().name == "automatic-cleanup":
+            checked.set()
+            assert resume.wait(5)
+        return original_exists(path)
+    def denied(path, *args, **kwargs):
+        if path == owned: raise PermissionError("controlled")
+        return original_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(Path, "unlink", denied)
+    def cleanup():
+        try: store.expire()
+        except Exception as error: errors.append(error)
+    def purge():
+        purging.set()
+        try: results.append(store.storage.purge(job["id"]))
+        except Exception as error: errors.append(error)
+        finally: purged.set()
+    automatic = threading.Thread(target=cleanup, name="automatic-cleanup")
+    manual = threading.Thread(target=purge)
+    automatic.start()
+    try:
+        assert checked.wait(5)
+        manual.start(); assert purging.wait(5)
+        interleaved = purged.wait(.2)
+        extra = directory / "unconfirmed.txt"
+        if interleaved: extra.write_text("must survive a committed deletion manifest")
+    finally:
+        resume.set(); automatic.join(5)
+        if manual.ident is not None: manual.join(5)
+    assert not automatic.is_alive() and not manual.is_alive() and not errors
+    assert not interleaved, "automatic cleanup crossed a newly committed purge manifest"
+    assert results[0]["status"] == "deleted"
+
+
 def test_purge_hidden_work_is_idempotent_and_preserves_other_work(web_config, media_fixtures):
     store = JobStore(web_config); job, path, data = completed(store, media_fixtures[0])
     other, other_path, other_data = completed(store, media_fixtures[0])

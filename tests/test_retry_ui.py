@@ -61,3 +61,35 @@ def test_explicit_redownload_preserves_old_files(daily_server, browser):
         assert worker.store.get(old["id"])["files"]
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("browser", ["chromium", "webkit"], indirect=True)
+@pytest.mark.parametrize("target_state", ["hidden_before", "hidden_after", "missing"])
+def test_late_duplicate_view_handles_current_target_state(daily_server, browser, target_state):
+    import time
+    url, worker = daily_server
+    old = worker.store.create(URL); old = wait_finished(worker.store, old["id"])
+    if target_state == "hidden_before": worker.store.remove(old["id"])
+    duplicate = worker.store.create("https://v.douyin.com/different-short-link/")
+    deadline = time.monotonic() + 10
+    while worker.store.get(duplicate["id"])["status"] != "duplicate" and time.monotonic() < deadline:
+        time.sleep(.03)
+    assert worker.store.get(duplicate["id"])["status"] == "duplicate"
+    page = browser.new_page(viewport={"width": 390, "height": 844})
+    try:
+        if target_state == "hidden_after": worker.store.remove(old["id"])
+        if target_state == "missing":
+            worker.store.file_path(worker.store.file(old["files"][0]["id"])).unlink()
+        page.goto(url)
+        card = page.locator(f"#job-list [data-job-id='{duplicate['id']}']")
+        if target_state == "missing":
+            expect(card.get_by_text("已有收藏文件已不可用，可以重新下载。", exact=True)).to_be_visible()
+            expect(card.get_by_role("button", name="查看已有收藏", exact=True)).to_have_count(0)
+            expect(card.get_by_role("button", name="一键重试", exact=True)).to_be_visible()
+        else:
+            card.get_by_role("button", name="恢复并查看", exact=True).click()
+            expect(page.locator("#existing-card").get_by_text("已完成", exact=True)).to_be_visible()
+            assert worker.store.get(old["id"])["files"]
+        expect(page.locator("#action-error")).to_be_hidden()
+    finally:
+        page.close()

@@ -167,6 +167,14 @@ async function showExisting(id, restore = false) {
   if (restore) window.dispatchEvent(new Event("lumabox:storage-changed"));
 }
 
+async function showDuplicate(job) {
+  const current = await api(`/api/jobs/${encodeURIComponent(job.id)}`);
+  const target = current.duplicate_target;
+  if (!target) throw new Error("已有收藏文件已不可用，可以重新下载。");
+  if (target.hidden && !job.duplicate_target?.hidden && !window.confirm("这份收藏的记录已移除。恢复并查看吗？")) return;
+  await showExisting(target.id, target.hidden);
+}
+
 function offerDuplicate(error, request) {
   if (!error.existing) return false;
   const existing = error.existing;
@@ -201,7 +209,7 @@ function buildCard(job) {
   if (job.status === "running") detail = progressText(job);
   if (job.status === "pending") detail = "已加入队列，稍后开始。";
   if (job.status === "retry_wait") detail = `${failureText(job)} ${Math.max(0, Math.ceil(job.retry_at - Date.now() / 1000))} 秒后自动重试，可随时取消。`;
-  if (job.status === "duplicate") detail = "此作品已有收藏，本次未保留重复文件。";
+  if (job.status === "duplicate") detail = job.duplicate_target ? "此作品已有收藏，本次未保留重复文件。" : "已有收藏文件已不可用，可以重新下载。";
   if (job.status === "cancelling") detail = "正在停止下载并清理未完成文件，请稍候。";
   if (job.status === "cancelled") detail = "下载已取消。需要时可以重新下载。";
   if (job.status === "expired") detail = "旧版临时文件已过期，可以重新保存此作品。";
@@ -272,7 +280,7 @@ function buildCard(job) {
     extra.append(links);
     if (!remoteMode || gallery) controls.append(extra);
   }
-  if (job.status === "duplicate" && job.duplicate_of) controls.append(action("查看已有收藏", "preview-button", () => showExisting(job.duplicate_of)));
+  if (job.status === "duplicate" && job.duplicate_target) controls.append(action(job.duplicate_target.hidden ? "恢复并查看" : "查看已有收藏", "preview-button", () => showDuplicate(job)));
   if (["failed", "expired", "cancelled", "duplicate"].includes(job.status)) controls.append(action(job.status === "cancelled" ? "重新下载" : "一键重试", "retry-button", async () => {
     const request = { input: job.source_url, video_limit_mib: selectedLimit() };
     try { await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { video_limit_mib: request.video_limit_mib }); await addJob(); }

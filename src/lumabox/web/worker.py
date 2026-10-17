@@ -124,7 +124,12 @@ class JobWorker:
 
     def _wait_retry(self, job):
         while not self.stopping.is_set():
-            current = self.store.get(job["id"])
+            try:
+                current = self.store.get(job["id"])
+            except WebError as error:
+                if error.code == "NOT_FOUND":
+                    return None  # A cancelled waiter may already be hidden or purged.
+                raise
             if current["status"] != "retry_wait":
                 return None
             now = time.time()

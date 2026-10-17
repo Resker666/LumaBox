@@ -84,3 +84,17 @@ def test_duplicate_response_and_restore_are_guarded(web_config, media_fixtures):
         assert client.post(route, json={}).status_code == 403
         assert client.post(route, json={}, headers=headers(client)).json()["id"] == old["id"]
         assert client.post("/api/jobs", json={"input": URL, "force_download": "yes"}, headers=headers(client)).status_code == 400
+
+
+def test_duplicate_target_tracks_visibility_and_deleted_files(web_config, media_fixtures):
+    store = JobStore(web_config); old, path, data = completed(store, media_fixtures[0])
+    duplicate = store.create("https://v.douyin.com/late-target/"); store.claim()
+    assert store.mark_duplicate(duplicate["id"], old["id"])
+    assert store.get(duplicate["id"])["duplicate_target"] == {"id": old["id"], "hidden": False}
+    store.remove(old["id"])
+    assert store.get(duplicate["id"])["duplicate_target"] == {"id": old["id"], "hidden": True}
+    path.unlink()
+    assert store.get(duplicate["id"])["duplicate_target"] is None
+    path.write_bytes(data)
+    assert store.storage.purge(old["id"])["status"] == "deleted"
+    assert store.get(duplicate["id"])["duplicate_target"] is None
