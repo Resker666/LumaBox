@@ -166,6 +166,24 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
             raise WebError("INVALID_REQUEST")
         return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib), force_download=body.get("force_download", False))
 
+    @app.get("/api/storage")
+    def storage_summary(request: Request):
+        query = request.query_params
+        if set(query) - {"refresh"} or query.get("refresh", "0") not in {"0", "1"}:
+            raise WebError("INVALID_REQUEST")
+        return store.storage.summary(refresh=query.get("refresh") == "1")
+
+    @app.get("/api/storage/items")
+    def storage_items(request: Request):
+        query = request.query_params
+        try:
+            if set(query) - {"scope", "page", "page_size"}:
+                raise ValueError
+            page, size = int(query.get("page", "1")), int(query.get("page_size", "20"))
+        except ValueError:
+            raise WebError("INVALID_REQUEST") from None
+        return store.storage.items(scope=query.get("scope", "all"), page=page, page_size=size)
+
     @app.post("/api/jobs/{job_id}/restore")
     async def restore_record(job_id: str, request: Request):
         write_guard(request)

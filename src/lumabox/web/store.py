@@ -23,6 +23,7 @@ from ..diagnostics import public_diagnostics
 from .config import WebConfig, WebError, is_link
 from .retry_policy import MAX_ATTEMPTS, RETRY_DELAY_SECONDS, should_retry
 from .duplicates import DuplicateWorkError, available, find_match
+from .storage import StorageManager
 
 ID = re.compile(r"[0-9a-f]{32}")
 
@@ -69,6 +70,7 @@ class JobStore:
             db.execute("CREATE INDEX IF NOT EXISTS jobs_url ON jobs(url)")
             previous = db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()
             self.previous_output = Path(previous[0]) if previous else config.data_dir / "outputs"
+        self.storage = StorageManager(self)
 
     @contextmanager
     def connection(self):
@@ -152,6 +154,7 @@ class JobStore:
             if row["status"] != "success" or row["storage_state"] != "present" or not available(self, db, job_id):
                 raise WebError("RESULT_UNAVAILABLE", 409)
             db.execute("UPDATE jobs SET hidden_at=NULL WHERE id=?", (job_id,))
+        self.storage.invalidate()
         return self.get(job_id)
 
     def claim(self) -> dict | None:
@@ -267,11 +270,15 @@ class JobStore:
             if job["status"] in ("pending", "running", "retry_wait", "cancelling"):
                 raise WebError("JOB_ACTIVE", 409)
             with self.connection() as db:
-                return db.execute("UPDATE jobs SET hidden_at=? WHERE id=? AND hidden_at IS NULL", (time.time(), job_id)).rowcount
+                count = db.execute("UPDATE jobs SET hidden_at=? WHERE id=? AND hidden_at IS NULL", (time.time(), job_id)).rowcount
+            self.storage.invalidate()
+            return count
 
     def clear_failed(self) -> int:
         with self.connection() as db:
-            return db.execute("UPDATE jobs SET hidden_at=? WHERE status='failed' AND hidden_at IS NULL", (time.time(),)).rowcount
+            count = db.execute("UPDATE jobs SET hidden_at=? WHERE status='failed' AND hidden_at IS NULL", (time.time(),)).rowcount
+        self.storage.invalidate()
+        return count
 
     def cancel(self, job_id: str) -> dict:
         with self.lock:
@@ -331,6 +338,7 @@ class JobStore:
                     file["mime"], file.get("width"), file.get("height"), file.get("duration")))
             db.execute("UPDATE jobs SET status='success',work_id=?,kind=?,title=COALESCE(?,title),expected_count=?,actual_count=?,updated_at=? WHERE id=?",
                        (result["work_id"], result["kind"], normalize_title(result.get("title")), result["expected_count"], result["actual_count"], time.time(), job_id))
+        self.storage.invalidate()
 
     def fail(self, job_id: str, error: str, result: dict | None = None):
         result = result if isinstance(result, dict) else {}
@@ -446,6 +454,7 @@ class JobStore:
         with self.connection() as db:
             db.execute("INSERT OR REPLACE INTO meta VALUES ('output_root',?)", (str(new),))
         self.previous_output = new
+        self.storage.invalidate()
 
     def file_path(self, file: dict) -> Path:
         path = self.safe_path(file["relative_path"])
@@ -476,6 +485,7 @@ class JobStore:
     def try_cleanup(self, job_id: str) -> bool:
         try:
             self.cleanup(job_id)
+            self.storage.invalidate()
             return True
         except (OSError, WebError):
             logging.getLogger(__name__).warning("Private output cleanup deferred; will retry at expiry.")
