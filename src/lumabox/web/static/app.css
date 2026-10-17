@@ -96,6 +96,9 @@ textarea { display:block; resize:vertical; min-height:115px; max-height:320px; }
 .job-status.running::before { content:""; width:6px; height:6px; background:currentColor; border-radius:50%; animation:breathe 1.5s infinite; }
 .job-status.cancelling { background:#fbefdf; color:#9a774d; }
 .job-status.cancelled { background:#eeeee8; color:#777e70; }
+.job-status.retry_wait { background:#fbefdf; color:#9a774d; }.job-status.duplicate { background:#eaf2e8; color:#507d58; }
+.duplicate-notice { margin-top:16px; border:1px solid #d4dfca; border-radius:10px; padding:14px; background:#f1f6ed; font-size:12px; }
+.attempt-log { margin-top:9px; color:var(--muted); font-size:11px; }.attempt-log summary { cursor:pointer; }
 .cancel-button { border:1px solid #e3cbb8; border-radius:8px; padding:8px 15px; font-size:12px; color:#a36946; background:#fff9f2; }
 .cancel-button:hover:enabled { background:#fbefe3; border-color:#cba27f; }
 .cancel-button:disabled { opacity:.5; cursor:wait; }

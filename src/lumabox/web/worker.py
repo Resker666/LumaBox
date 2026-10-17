@@ -175,7 +175,10 @@ class JobWorker:
             if snapshot is not None and snapshot != last_progress:
                 self.store.update_progress(job["id"], snapshot)
                 last_progress = snapshot
-            result = json.loads(output.read_bytes().splitlines()[-1])
+            decoded = json.loads(output.read_bytes().splitlines()[-1])
+            if not isinstance(decoded, dict):
+                raise WebError("VERIFY_FAILED")
+            result = decoded
             if process.returncode != 0 or result.get("status") != "success":
                 code = result.get("error")
                 raise WebError(code if code in ERRORS else "DOWNLOAD_FAILED")

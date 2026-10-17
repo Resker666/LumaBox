@@ -16,7 +16,7 @@ def test_cancel_pending_and_running_then_retry_without_stopping_service(daily_se
         submit(page, URL)
         expect(page.locator("#job-list").get_by_text("下载中", exact=True)).to_be_visible(timeout=10000)
         first = worker.store.list()[0]["id"]
-        submit(page, URL)
+        submit(page, "https://v.douyin.com/following/")
         expect(page.locator("#job-list").get_by_text("待下载", exact=True)).to_be_visible()
         pending = worker.store.list()[0]["id"]
         waiting_card = page.locator(f'[data-job-id="{pending}"]')

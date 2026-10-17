@@ -2,7 +2,7 @@ import time
 import pytest
 from lumabox.web.store import JobStore
 from lumabox.web.config import WebError
-from web_helpers import URL, retry_worker
+from web_helpers import URL, retry_worker, fixture_worker
 
 FAILURE = {"diagnostics": {"network_reason": "CONNECTION_RESET", "stage": "media_transfer", "url": "secret"}}
 
@@ -121,3 +121,14 @@ def test_cleanup_failure_does_not_retry(web_config, tmp_path, media_fixtures, mo
     assert store.get(job["id"])["status"] == "failed"
     assert store.get(job["id"])["error"] == "CLEANUP_FAILED"
     assert (tmp_path / "attempt-count.txt").read_text() == "1"
+
+
+def test_nonobject_cli_report_fails_without_stranding_queue(web_config, tmp_path, media_fixtures):
+    store = JobStore(web_config); first = store.create(URL)
+    worker = fixture_worker(web_config, store, tmp_path, media_fixtures[0])
+    worker.script.write_text("print('[]')", encoding="utf-8")
+    assert worker.run_once()
+    assert store.get(first["id"])["error"] == "VERIFY_FAILED"
+    second = store.create(URL)
+    fixture_worker(web_config, store, tmp_path, media_fixtures[0]).run_once()
+    assert store.get(second["id"])["status"] == "success"

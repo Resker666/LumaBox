@@ -181,6 +181,7 @@ class JobStore:
 
     def schedule_retry(self, job_id: str, error: str, result: dict, *, now: float | None = None) -> bool:
         now = time.time() if now is None else now
+        result = result if isinstance(result, dict) else {}
         detail = public_diagnostics(result.get("diagnostics"))
         with self.connection() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
