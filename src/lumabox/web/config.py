@@ -28,6 +28,9 @@ class WebConfig:
     retention_seconds: int | None = None
     output: Path | None = None
     video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB
+    remote_mode: bool = False
+    access_file: Path | None = None
+    secure_cookie: bool = False
 
     def __post_init__(self):
         if not 1 <= self.port <= 65535 or self.task_timeout <= 0:

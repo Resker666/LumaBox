@@ -57,6 +57,7 @@ class BrowserSession:
         self.media_response_count = 0
         self.media_response_truncated = False
         self.expected_identity = None
+        self.confirmed_work = None
         self.detail_work = None
         self.detail_error = None
         self.detail_tasks = set()
@@ -308,6 +309,8 @@ class BrowserSession:
                     if (host := _diagnostic_host(r.get("url", "")))})
                 self.diagnostics["scope_confirmed"] = bool(snapshot.get("scope_confirmed"))
                 self.diagnostics["identity_source"] = snapshot.get("identity_source")
+                if snapshot.get("scope_confirmed") and snapshot.get("work_id") == work_id:
+                    self.confirmed_work = (work_id, kind, normalize_title(snapshot.get("title")))
                 self.diagnostics["detail_response_count"] = self.detail_response_count
                 self.diagnostics["detail_metadata_parsed"] = bool(self.detail_work and self.detail_work.work_id == work_id)
                 self.diagnostics["media_schemes"] = sorted({

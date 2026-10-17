@@ -5,7 +5,7 @@ from .models import Work, MediaResource
 from .metadata import normalize_title
 from .urls import https_parts, validate_media_url
 
-# Based on observed Douyin detail DOM on 2026-10-12/13. No application state is read.
+# Based on observed Douyin detail DOM on 2026-10-12/13/16. No application state is read.
 DOM_SNAPSHOT = r"""({work_id, kind}) => {
  const visible = e => !!(e && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
  const feedSelector = '[data-e2e="feed-active-video"][data-e2e-vid]';
@@ -60,10 +60,15 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
    const counters = Array.from(root.querySelectorAll('*')).map(e => (e.textContent || '').trim())
      .filter(t => /^\d+\s*\/\s*\d+$/.test(t)).map(t => t.split('/').map(Number).join('/'));
    const pairs = [...new Set(counters)];
-   if (pairs.length !== 1) return out;
-   const [current, total] = pairs[0].split('/').map(Number);
-   out.count = total;
    const slides = Array.from(player.querySelectorAll('.dySwiperSlide'));
+   // Observed single Live Photo detail pages omit 1/1 but explicitly hide the
+   // one-item live progress control. A lone DOM slide alone proves no total.
+   const single = pairs.length === 0 && candidate.source === 'note_sidebar' &&
+     player.querySelectorAll('.xgplayer-progress.one-live-hide').length === 1 && slides.length === 1 &&
+     slides[0].querySelectorAll('video').length === 1;
+   if (pairs.length !== 1 && !single) return out;
+   const [current, total] = single ? [1, 1] : pairs[0].split('/').map(Number);
+   out.count = total;
    const track = slides[0]?.parentElement;
    const trackStyle = track && getComputedStyle(track);
    const viewport = player.getBoundingClientRect();
@@ -85,7 +90,13 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
          (declared !== null && (!/^\d+$/.test(declared) || Number(declared) !== order - 1)))
        return {url: '', order: 0, role: 'slide'};
      const foreground = Array.from(slide.querySelectorAll('img.o0KibnKo')).filter(i => i.parentElement?.parentElement === slide);
-     return {url: foreground.length === 1 ? foreground[0].currentSrc || foreground[0].src : '', order, role: 'slide'};
+     // The hidden player outside the slide supplies music; only a video owned
+     // by this slide can be its motion companion. Never read arbitrary media responses.
+     const videos = Array.from(slide.querySelectorAll('video'));
+     const video = videos.length === 1 ? videos[0] : null;
+     const motion = video ? video.getAttribute('src') || video.currentSrc || video.querySelector('source')?.src || '' : '';
+     return {url: foreground.length === 1 ? foreground[0].currentSrc || foreground[0].src : '', order, role: 'slide',
+       motion_required: videos.length > 0, motion_url: motion};
    });
  }
  return out;
@@ -131,7 +142,12 @@ def extract_work(snapshot: dict, expected_id: str) -> Work:
             has_placeholder = True
             continue
         validate_media_url(url)
-        resources.append(MediaResource(url, entry["order"]))
+        motion = entry.get("motion_url") if kind == "gallery" else None
+        if entry.get("motion_required") or motion:
+            if not isinstance(motion, str) or not motion.startswith("https://"):
+                raise LumaBoxError("UNSUPPORTED_MEDIA", "The slide's motion resource is not available")
+            validate_media_url(motion)
+        resources.append(MediaResource(url, entry["order"], motion or None))
     if has_placeholder:
         raise LumaBoxError("UNSUPPORTED_MEDIA", "Gallery images are still showing the site's default placeholder")
     return Work(expected_id, kind, tuple(resources), normalize_title(snapshot.get("title")))

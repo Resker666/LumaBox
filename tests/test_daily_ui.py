@@ -17,11 +17,11 @@ from web_helpers import URL, WORK_ID, fixture_worker
 
 
 @pytest.fixture
-def daily_server(tmp_path, media_fixtures, monkeypatch):
+def daily_server(tmp_path, media_fixtures, monkeypatch, request):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
-    config = WebConfig(tmp_path / "web", port=port)
+    config = WebConfig(tmp_path / "web", port=port, remote_mode=getattr(request, "param", False))
     store = JobStore(config)
     worker = fixture_worker(config, store, tmp_path, media_fixtures[0])
     import lumabox.web.app as web_app

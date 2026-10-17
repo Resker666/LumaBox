@@ -16,9 +16,13 @@ from lumabox.web.store import JobStore
 from web_helpers import URL, fixture_worker
 
 @pytest.fixture(scope="module")
-def browser():
+def browser(request):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        engine_name = getattr(request, "param", "chromium")
+        engine = getattr(p, engine_name)
+        if engine_name == "webkit" and not Path(engine.executable_path).is_file():
+            pytest.skip("Install Playwright WebKit to run the Safari compatibility check")
+        browser = engine.launch(headless=True)
         yield browser
         browser.close()
 
