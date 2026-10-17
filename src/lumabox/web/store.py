@@ -21,6 +21,7 @@ from ..metadata import normalize_title
 from ..progress import sanitize_snapshot
 from ..diagnostics import public_diagnostics
 from .config import WebConfig, WebError, is_link
+from .retry_policy import MAX_ATTEMPTS, RETRY_DELAY_SECONDS, should_retry
 
 ID = re.compile(r"[0-9a-f]{32}")
 
@@ -54,7 +55,10 @@ class JobStore:
             for name, definition in (("video_limit_mib", "INTEGER NOT NULL DEFAULT 100"),
                                      ("error_detail", "TEXT"), ("retry_of", "TEXT"),
                                      ("title", "TEXT"), ("progress", "TEXT NOT NULL DEFAULT '{}'"),
-                                     ("started_at", "REAL"), ("hidden_at", "REAL")):
+                                     ("started_at", "REAL"), ("hidden_at", "REAL"),
+                                     ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("retry_at", "REAL"), ("deadline_at", "REAL"),
+                                     ("attempts", "TEXT NOT NULL DEFAULT '[]'")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
             previous = db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()
@@ -87,7 +91,7 @@ class JobStore:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT count(*) FROM jobs WHERE status='pending'").fetchone()[0] >= 10:
                 raise WebError("QUEUE_FULL", 409)
-            if retry_of and db.execute("SELECT 1 FROM jobs WHERE retry_of=? AND status IN ('pending','running')", (retry_of,)).fetchone():
+            if retry_of and db.execute("SELECT 1 FROM jobs WHERE retry_of=? AND status IN ('pending','running','retry_wait','cancelling')", (retry_of,)).fetchone():
                 raise WebError("ALREADY_QUEUED", 409)
             db.execute("INSERT INTO jobs (id,url,work_id,kind,status,created_at,updated_at,video_limit_mib,retry_of) VALUES (?,?,?,?,?,?,?,?,?)",
                        (job_id, url, link.work_id, link.kind, "pending", now, now, video_limit_mib, retry_of))
@@ -107,12 +111,50 @@ class JobStore:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','cancelling')").fetchone():
                 return None
+            waiting = db.execute("SELECT * FROM jobs WHERE status='retry_wait' AND hidden_at IS NULL ORDER BY created_at LIMIT 1").fetchone()
+            if waiting is not None:
+                return dict(waiting)
             row = db.execute("SELECT * FROM jobs WHERE status='pending' AND hidden_at IS NULL ORDER BY created_at,rowid LIMIT 1").fetchone()
             if row is None:
                 return None
             now = time.time()
-            db.execute("UPDATE jobs SET status='running',updated_at=?,started_at=? WHERE id=?", (now, now, row["id"]))
-            return {**dict(row), "status": "running", "started_at": now}
+            deadline = now + self.config.task_timeout
+            db.execute("UPDATE jobs SET status='running',updated_at=?,started_at=?,deadline_at=?,attempt_count=1 WHERE id=?",
+                       (now, now, deadline, row["id"]))
+            return {**dict(row), "status": "running", "started_at": now, "deadline_at": deadline, "attempt_count": 1}
+
+    @staticmethod
+    def _attempt(db, row, error, detail, now):
+        attempts = json.loads(row["attempts"] or "[]")
+        number = row["attempt_count"]
+        if number and not any(a["number"] == number for a in attempts):
+            attempts.append({"number": number, "ended_at": now, "error": error, "detail": detail})
+            db.execute("UPDATE jobs SET attempts=? WHERE id=?", (json.dumps(attempts[-MAX_ATTEMPTS:]), row["id"]))
+
+    def schedule_retry(self, job_id: str, error: str, result: dict, *, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        detail = public_diagnostics(result.get("diagnostics"))
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
+            if (row is None or row["status"] != "running" or row["attempt_count"] != 1 or
+                    not row["deadline_at"] or now + RETRY_DELAY_SECONDS >= row["deadline_at"] or
+                    not should_retry(error, detail)):
+                return False
+            self._attempt(db, row, error, detail, now)
+            db.execute("UPDATE jobs SET status='retry_wait',retry_at=?,error=?,error_detail=?,updated_at=? WHERE id=?",
+                       (now + RETRY_DELAY_SECONDS, error, json.dumps(detail), now, job_id))
+        return True
+
+    def begin_retry(self, job_id: str, *, now: float | None = None) -> dict | None:
+        now = time.time() if now is None else now
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if (row is None or row["status"] != "retry_wait" or row["attempt_count"] != 1 or
+                    now < row["retry_at"] or now >= row["deadline_at"]):
+                return None
+            db.execute("UPDATE jobs SET status='running',attempt_count=2,retry_at=NULL,error=NULL,error_detail='{}',progress='{}',updated_at=? WHERE id=?",
+                       (now, job_id))
+            return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
     def get(self, job_id: str) -> dict:
         if not ID.fullmatch(job_id):
@@ -126,8 +168,10 @@ class JobStore:
             result.update(source_url=row["url"], video_limit_mib=row["video_limit_mib"],
                           error_detail=json.loads(row["error_detail"] or "{}"), output_directory=None, files=[],
                           title=normalize_title(row["title"]), progress=json.loads(row["progress"] or "{}"))
+            result.update(attempt_count=row["attempt_count"], max_attempts=MAX_ATTEMPTS,
+                          retry_at=row["retry_at"], attempts=json.loads(row["attempts"] or "[]"))
             if row["started_at"] is not None:
-                end = time.time() if row["status"] in ("running", "cancelling") else row["updated_at"]
+                end = time.time() if row["status"] in ("running", "cancelling", "retry_wait") else row["updated_at"]
                 result["progress"]["elapsed_seconds"] = max(0, int(end - row["started_at"]))
             if row["status"] == "success":
                 result["files"] = [self.public_file(f) for f in db.execute("SELECT * FROM files WHERE job_id=? ORDER BY rowid", (job_id,))]
@@ -146,7 +190,7 @@ class JobStore:
 
     def search(self, q="", status="all", page=1, page_size=20) -> dict:
         if (not isinstance(q, str) or len(q) > 200 or
-                status not in ("all", "pending", "running", "cancelling", "cancelled", "success", "failed", "expired") or
+                status not in ("all", "pending", "running", "retry_wait", "cancelling", "cancelled", "success", "failed", "expired") or
                 type(page) is not int or not 1 <= page <= 1_000_000 or
                 type(page_size) is not int or not 1 <= page_size <= 100):
             raise WebError("INVALID_REQUEST")
@@ -170,7 +214,7 @@ class JobStore:
     def remove(self, job_id: str) -> int:
         with self.lock:
             job = self.get(job_id)
-            if job["status"] in ("pending", "running", "cancelling"):
+            if job["status"] in ("pending", "running", "retry_wait", "cancelling"):
                 raise WebError("JOB_ACTIVE", 409)
             with self.connection() as db:
                 return db.execute("UPDATE jobs SET hidden_at=? WHERE id=? AND hidden_at IS NULL", (time.time(), job_id)).rowcount
@@ -182,9 +226,9 @@ class JobStore:
     def cancel(self, job_id: str) -> dict:
         with self.lock:
             job = self.get(job_id)
-            if job["status"] not in ("pending", "running", "cancelling", "cancelled"):
+            if job["status"] not in ("pending", "running", "retry_wait", "cancelling", "cancelled"):
                 raise WebError("NOT_CANCELLABLE", 409)
-            status = {"pending": "cancelled", "running": "cancelling"}.get(job["status"])
+            status = {"pending": "cancelled", "retry_wait": "cancelled", "running": "cancelling"}.get(job["status"])
             if status:
                 with self.connection() as db:
                     db.execute("UPDATE jobs SET status=?,updated_at=? WHERE id=?", (status, time.time(), job_id))
@@ -226,10 +270,11 @@ class JobStore:
 
     def finish(self, job_id: str, result: dict, files: list[dict]):
         with self.connection() as db:
-            row = db.execute("SELECT status,work_id,kind FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
             if (row is None or row["status"] != "running" or
                     (row["work_id"] and (row["work_id"] != result["work_id"] or row["kind"] != result["kind"]))):
                 raise WebError("VERIFY_FAILED")
+            self._attempt(db, row, None, {}, time.time())
             for file in files:
                 db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?)", (
                     uuid.uuid4().hex, job_id, file["relative_path"], file["name"], file["bytes"], file["sha256"],
@@ -243,17 +288,18 @@ class JobStore:
         diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
         detail = public_diagnostics(diagnostics)
         with self.connection() as db:
-            row = db.execute("SELECT work_id,kind,status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is not None and row["status"] == "cancelling":
                 db.execute("UPDATE jobs SET status='cancelled',error=NULL,error_detail='{}',updated_at=? WHERE id=?", (time.time(), job_id))
                 return
-            if row is None or row["status"] not in ("pending", "running"):
+            if row is None or row["status"] not in ("pending", "running", "retry_wait"):
                 return
+            self._attempt(db, row, error, detail, time.time())
             work_id, kind = result.get("work_id"), result.get("kind")
             if (isinstance(work_id, str) and re.fullmatch(r"\d{15,20}", work_id) and kind in ("video", "gallery") and
                     row and (row["work_id"] is None or (row["work_id"] == work_id and row["kind"] == kind))):
                 db.execute("UPDATE jobs SET work_id=?,kind=?,title=COALESCE(?,title) WHERE id=?", (work_id, kind, normalize_title(result.get("title")), job_id))
-            db.execute("UPDATE jobs SET status='failed',error=?,error_detail=?,updated_at=? WHERE id=? AND status IN ('pending','running')",
+            db.execute("UPDATE jobs SET status='failed',error=?,error_detail=?,updated_at=? WHERE id=? AND status IN ('pending','running','retry_wait')",
                        (error, json.dumps(detail), time.time(), job_id))
 
     def recover(self):

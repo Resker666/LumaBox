@@ -2,6 +2,12 @@ import subprocess
 import pytest
 
 
+@pytest.fixture
+def web_config(tmp_path):
+    from lumabox.web.config import WebConfig
+    return WebConfig(tmp_path / "data")
+
+
 @pytest.fixture(scope="session")
 def media_fixtures(tmp_path_factory):
     directory = tmp_path_factory.mktemp("media")
