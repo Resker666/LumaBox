@@ -198,6 +198,8 @@ class StorageManager:
                 if row["storage_state"] != "present" and not row["purge_manifest"]:
                     raise ValueError
                 manifest = json.loads(row["purge_manifest"]) if row["purge_manifest"] else None
+                if row["storage_state"] != "present" and not isinstance(manifest, list):
+                    raise ValueError
             except (TypeError, ValueError):
                 raise WebError("UNSAFE_DELETE", 409) from None
             try:

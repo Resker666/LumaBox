@@ -233,7 +233,7 @@ def test_concurrent_purge_only_removes_the_owned_files_once(web_config, media_fi
     assert not path.exists()
 
 
-@pytest.mark.parametrize("manifest", ['[""]', '{"unexpected": true}', 'not-json'])
+@pytest.mark.parametrize("manifest", ['[""]', '{"unexpected": true}', 'not-json', 'null'])
 def test_corrupt_deletion_manifest_is_refused_without_deleting_files(web_config, media_fixtures, manifest):
     store = JobStore(web_config); job, path, data = completed(store, media_fixtures[0])
     with store.connection() as db:

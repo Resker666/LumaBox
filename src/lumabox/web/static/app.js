@@ -164,6 +164,7 @@ async function showExisting(id, restore = false) {
   $("existing-card").replaceChildren(buildCard(job));
   if (!$("existing-dialog").open) $("existing-dialog").showModal();
   await refreshJobs();
+  if (restore) window.dispatchEvent(new Event("lumabox:storage-changed"));
 }
 
 function offerDuplicate(error, request) {
@@ -210,6 +211,7 @@ function buildCard(job) {
     const motions = gallery ? media.filter((file) => file.mime === "video/mp4").length : 0;
     const description = gallery ? `${job.actual_count} 张图片${motions ? ` · ${motions} 段动态片段` : ""}` : "完整视频";
     detail = `${description} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
+    if (job.storage_state !== "present") detail = "文件删除尚未完成，请到文件管理中处理。";
   }
   if (detail) body.append(element("p", `job-detail ${job.status}`, detail));
   if (job.attempts?.length) {
@@ -236,7 +238,7 @@ function buildCard(job) {
     await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, {});
     await refreshJobs();
   }, "cancel"));
-  if (job.status === "success") {
+  if (job.status === "success" && job.storage_state === "present") {
     if (job.output_directory) body.append(element("p", "job-path", `${remoteMode ? "服务器保存位置" : "保存位置"}：${job.output_directory}`));
     const media = job.files.filter((file) => ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime));
     if (media.length) controls.append(action(gallery ? "预览图集" : "预览视频", "preview-button", () => openPreview(job), "preview"));
@@ -280,6 +282,7 @@ function buildCard(job) {
     if (!window.confirm(`移除这条收藏记录？已保存的文件会保留在${remoteMode ? "服务器" : "电脑"}上。`)) return;
     await api(`/api/jobs/${encodeURIComponent(job.id)}/remove`, {});
     await refreshJobs();
+    window.dispatchEvent(new Event("lumabox:storage-changed"));
   }, "remove"));
   if (controls.childElementCount) body.append(controls);
   card.append(body);
@@ -326,6 +329,7 @@ async function refreshJobs() {
   try {
     const result = await api(`/api/jobs?${query}`);
     if (version !== requestVersion) return;
+    const previousStates = new Map(jobs.map((job) => [job.id, job.status]));
     jobs = result.jobs;
     total = result.total;
     history.page = result.page;
@@ -334,6 +338,7 @@ async function refreshJobs() {
       return refreshJobs();
     }
     renderJobs();
+    if (jobs.some((job) => ["success", "failed", "cancelled", "duplicate"].includes(job.status) && previousStates.get(job.id) !== job.status)) window.dispatchEvent(new Event("lumabox:storage-changed"));
     notice("connection-error", "");
   } catch {
     if (version === requestVersion) notice("connection-error", "连接暂时中断，正在尝试重新连接…");
@@ -448,6 +453,7 @@ $("clear-failed").addEventListener("click", async () => {
   notice("action-error", "");
   try {
     const result = await api("/api/jobs/clear-failed", {});
+    window.dispatchEvent(new Event("lumabox:storage-changed"));
     await refreshJobs();
     notice("submit-success", `已清理 ${result.removed} 条失败记录，已保存的文件保留在${remoteMode ? "服务器" : "电脑"}上。`);
   } catch (error) { notice("action-error", error.message); }
@@ -489,6 +495,7 @@ async function start() {
     updateLimit();
     $("submit-button").disabled = false;
     $("clear-failed").disabled = false;
+    window.LumaBoxStorage.init({ request: api, formatSize: size, onChanged: refreshJobs });
     notice("connection-error", "");
     poll();
   } catch {
