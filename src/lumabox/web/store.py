@@ -12,10 +12,9 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from ..errors import LumaBoxError
-from ..urls import parse_input
+from ..urls import parse_input, canonical_page_url
 from ..limits import DEFAULT_VIDEO_LIMIT_MIB, video_limit_bytes
 from ..metadata import normalize_title
 from ..progress import sanitize_snapshot
@@ -67,6 +66,7 @@ class JobStore:
                                      ("storage_state", "TEXT NOT NULL DEFAULT 'present'"),
                                      ("purge_root", "TEXT"), ("purge_manifest", "TEXT"),
                                      ("include_audio", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("supplement_duplicate_audio", "INTEGER NOT NULL DEFAULT 1"),
                                      ("audio_state", "TEXT NOT NULL DEFAULT 'none'"),
                                      ("audio_error", "TEXT"), ("audio_token", "TEXT"), ("audio_root", "TEXT"),
                                      ("audio_manifest", "TEXT NOT NULL DEFAULT '[]'")):
@@ -91,8 +91,9 @@ class JobStore:
                 db.close()
 
     def create(self, text: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB, *, retry_of: str | None = None,
-               force_download: bool = False, include_audio: bool = False) -> dict:
-        if type(force_download) is not bool or type(include_audio) is not bool:
+               force_download: bool = False, include_audio: bool = False,
+               supplement_duplicate_audio: bool = True) -> dict:
+        if any(type(value) is not bool for value in (force_download, include_audio, supplement_duplicate_audio)):
             raise WebError("INVALID_REQUEST")
         if not isinstance(text, str) or not 1 <= len(text) <= 4096:
             raise WebError("INVALID_INPUT")
@@ -101,9 +102,7 @@ class JobStore:
             link = parse_input(text)
         except LumaBoxError:
             raise WebError("INVALID_INPUT") from None
-        parts = urlsplit(link.url)
-        url = (f"https://www.douyin.com/{'video' if link.kind == 'video' else 'note'}/{link.work_id}"
-               if link.work_id else f"https://v.douyin.com{parts.path}")
+        url = canonical_page_url(link)
         job_id, now = uuid.uuid4().hex, time.time()
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -114,18 +113,21 @@ class JobStore:
                 raise DuplicateWorkError(match)
             if db.execute("SELECT count(*) FROM jobs WHERE status='pending'").fetchone()[0] >= 10:
                 raise WebError("QUEUE_FULL", 409)
-            db.execute("INSERT INTO jobs (id,url,work_id,kind,status,created_at,updated_at,video_limit_mib,retry_of,force_download,include_audio,audio_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (job_id, url, link.work_id, link.kind, "pending", now, now, video_limit_mib, retry_of, int(force_download), int(include_audio), "waiting" if include_audio else "none"))
+            db.execute("INSERT INTO jobs (id,url,work_id,kind,status,created_at,updated_at,video_limit_mib,retry_of,force_download,include_audio,audio_state,supplement_duplicate_audio) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (job_id, url, link.work_id, link.kind, "pending", now, now, video_limit_mib, retry_of, int(force_download), int(include_audio), "waiting" if include_audio else "none", int(supplement_duplicate_audio)))
         return self.get(job_id)
 
-    def retry(self, job_id: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB) -> dict:
+    def retry(self, job_id: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB, *,
+              supplement_duplicate_audio: bool | None = None) -> dict:
         self.get(job_id)  # Validate the ID before querying the saved link.
         with self.lock:
             with self.connection() as db:
-                row = db.execute("SELECT url,status,include_audio FROM jobs WHERE id=?", (job_id,)).fetchone()
+                row = db.execute("SELECT url,status,include_audio,supplement_duplicate_audio FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row["status"] not in ("failed", "expired", "cancelled", "duplicate"):
                 raise WebError("NOT_RETRYABLE", 409)
-            return self.create(row["url"], video_limit_mib, retry_of=job_id, include_audio=bool(row["include_audio"]))
+            policy = bool(row["supplement_duplicate_audio"]) if supplement_duplicate_audio is None else supplement_duplicate_audio
+            return self.create(row["url"], video_limit_mib, retry_of=job_id,
+                               include_audio=bool(row["include_audio"]), supplement_duplicate_audio=policy)
 
     def check_duplicate(self, job_id, work_id, kind):
         with self.connection() as db:
@@ -149,7 +151,8 @@ class JobStore:
                 return False
             db.execute("UPDATE jobs SET status='duplicate',duplicate_of=?,work_id=?,kind=?,title=?,error=NULL,error_detail='{}',audio_state='none',updated_at=? WHERE id=?",
                        (target_id, target["work_id"], target["kind"], target["title"], time.time(), job_id))
-            supplement = bool(row["include_audio"]) and target["kind"] == "video" and target["status"] == "success" and target["hidden_at"] is None
+            supplement = (bool(row["include_audio"]) and bool(row["supplement_duplicate_audio"])
+                          and target["kind"] == "video" and target["status"] == "success" and target["hidden_at"] is None)
         if supplement:
             try:
                 self.audio.request(target_id)

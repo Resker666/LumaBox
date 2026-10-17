@@ -24,6 +24,7 @@
           <form id="job-form">
             <label for="work-input">作品链接或分享文案</label>
             <textarea id="work-input" name="input" rows="3" required maxlength="4096" placeholder="粘贴抖音视频、图集链接或分享文案…"></textarea>
+            <p id="input-count" class="input-hint" aria-live="polite">已识别 0 条链接 · 一次最多 10 条</p>
             <div class="submit-row">
               <span class="input-hint">支持视频、图集和短链接</span>
               <button id="submit-button" class="primary-button" type="submit" disabled>开始下载 <span aria-hidden="true">↘</span></button>
@@ -36,6 +37,7 @@
             <p id="submit-error" class="form-error" role="alert" hidden></p>
             <p id="submit-success" class="form-success" role="status" hidden></p>
             <section id="duplicate-notice" class="duplicate-notice" aria-label="已有作品提示" hidden><p id="duplicate-message" role="status"></p><div id="duplicate-actions" class="job-controls"></div></section>
+            <section id="batch-results" class="batch-results" aria-label="批量处理结果" hidden><p id="batch-summary" class="small" role="status"></p><ol id="batch-result-list"></ol><p id="batch-retained" class="input-hint" hidden></p><button id="refill-batch-links" class="page-button" type="button" hidden>回填未接收链接</button></section>
           </form>
         </section>
         <aside class="tips-panel">
@@ -46,7 +48,8 @@
           <div class="tip-detail"><span>长期保存</span><small>不会自动删除收藏</small></div>
         </aside>
       </div>
-      <section id="active-tasks" class="active-tasks" aria-labelledby="active-heading" hidden><div class="collection-heading"><div class="section-kicker"><h2 id="active-heading">进行中</h2></div><span id="active-count" class="muted small"></span></div><div id="active-list" class="job-list" aria-label="进行中的下载与音频任务"></div></section>
+      <p id="batch-operation-notice" class="form-success" role="status" hidden></p>
+      <section id="active-tasks" class="active-tasks" aria-labelledby="active-heading" hidden><div class="collection-heading"><div class="section-kicker"><h2 id="active-heading">进行中</h2></div><span id="active-count" class="muted small"></span></div><details id="active-selection" class="selection-tools"><summary>管理待下载</summary><p class="input-hint">仅选择待下载任务；已开始的下载与音频不会被批量取消。</p><div class="selection-actions"><button id="select-pending" class="page-button" type="button">选择待下载</button><button id="clear-pending-selection" class="quiet-button" type="button">清空选择</button><button id="cancel-selected" class="cancel-button" type="button" disabled>取消选中待下载（0）</button></div><p class="selection-count input-hint"></p></details><div id="active-list" class="job-list" aria-label="进行中的下载与音频任务"></div></section>
       <section class="collection" aria-labelledby="collection-heading">
         <div class="collection-heading"><div class="section-kicker"><span class="step-tag">02</span><h2 id="collection-heading">最近的收藏</h2></div><span id="task-count" class="muted small">0 份收藏</span></div>
         <div class="collection-toolbar">
@@ -54,6 +57,7 @@
           <div class="status-field"><label class="visually-hidden" for="collection-status">任务状态</label><select id="collection-status"><option value="all">全部状态</option><option value="success">已完成</option><option value="failed">未完成</option><option value="cancelled">已取消</option><option value="duplicate">已有收藏</option><option value="expired">已过期</option></select></div>
           <button id="clear-failed" class="quiet-button" type="button" disabled>清理失败记录</button>
         </div>
+        <details id="history-selection" class="selection-tools"><summary>批量重试</summary><p class="input-hint">仅选择当前页未完成、已取消或已过期任务，沿用各任务原来的下载与音频选项。</p><div class="selection-actions"><button id="select-retryable" class="page-button" type="button">选择本页可重试项</button><button id="clear-history-selection" class="quiet-button" type="button">清空选择</button><button id="retry-selected" class="retry-button" type="button" disabled>重试选中未完成（0）</button></div><p class="selection-count input-hint"></p></details>
         <p id="connection-error" class="form-error" role="status" hidden></p>
         <p id="action-error" class="form-error" role="alert" hidden></p>
         <div id="empty-state" class="empty-state"><span aria-hidden="true">▤</span><h3>光匣里还很安静</h3><p>添加第一条链接，把喜欢的瞬间留下来。</p></div>

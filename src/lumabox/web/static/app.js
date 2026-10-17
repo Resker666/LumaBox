@@ -62,6 +62,11 @@ const existingCards = new Map();
 let csrf = null, timer = null, searchTimer = null, requestVersion = 0;
 let jobs = [], activeJobs = [], total = 0, preview = null, previewVersion = 0, remoteMode = false;
 let existingJobId = null;
+const batchSelection = { pending: new Set(), retry: new Set() };
+const retryableStates = new Set(["failed", "cancelled", "expired"]);
+const batchLabels = { queued: "已加入队列", saved: "已收藏", already_queued: "已在队列", invalid: "链接无效", queue_full: "队列已满", cancelled: "已取消", not_pending: "已开始或状态已变化，未取消", not_retryable: "当前状态无法重试", not_found: "记录已移除", failed: "未能处理" };
+let batchBusy = false, submitting = false;
+let unacceptedBatchLinks = [];
 
 function notice(id, message) {
   $(id).textContent = message || "";
@@ -90,6 +95,107 @@ function element(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function inputLinks(text) {
+  return (text.match(/https?:\/\/[^\s<>"'，。；！）】]+/gi) || []).map((url) => url.replace(/[.,;!)\]}]+$/, ""));
+}
+
+function updateInputCount() {
+  const count = inputLinks($("work-input").value).length;
+  $("input-count").textContent = `已识别 ${count} 条链接 · 一次最多 10 条${count > 10 ? "，请分批提交" : ""}`;
+  $("input-count").classList.toggle("over-limit", count > 10);
+  $("submit-button").textContent = count > 1 ? `加入队列（${count}）` : "开始下载";
+}
+
+function renderBatchResults(report, originals = [], unaccepted = null, inputPreserved = true) {
+  // Queue operation reports must not replace the recovery copy of a submitted paste.
+  if (unaccepted !== null) unacceptedBatchLinks = unaccepted;
+  const list = $("batch-result-list");
+  list.replaceChildren();
+  for (const result of report.results) {
+    const row = element("li", `batch-result ${result.status}`);
+    row.append(element("span", "batch-result-status", batchLabels[result.status] || "未能处理"));
+    row.append(element("span", "batch-result-source", result.url || originals[result.index - 1] || result.id || "链接无法识别"));
+    if (result.existing) row.append(action(result.existing.hidden ? "恢复并查看" : "查看", "preview-button", () => showExisting(result.existing.id, result.existing.hidden)));
+    list.append(row);
+  }
+  const summary = report.summary;
+  const statuses = ["queued", "saved", "already_queued", "invalid", "queue_full", "cancelled", "not_pending", "not_retryable", "not_found", "failed"];
+  $("batch-summary").textContent = `共 ${summary.total} 项 · ${statuses.filter((key) => summary[key]).map((key) => `${batchLabels[key]} ${summary[key]}`).join(" · ")} · 等待队列 ${report.pending_count} / ${report.pending_limit}`;
+  $("batch-retained").textContent = unaccepted === null ? `之前提交的 ${unacceptedBatchLinks.length} 条未接收链接仍可追加回填，当前输入会保留。` : inputPreserved ? "未接收的链接已保留在输入框，可调整后再次提交。" : "你新编辑的文案已保留；未接收链接仍列在上方，可以追加回填到当前输入。";
+  $("batch-retained").hidden = unacceptedBatchLinks.length === 0;
+  $("refill-batch-links").hidden = unacceptedBatchLinks.length === 0;
+  $("batch-results").hidden = false;
+}
+
+function selectionSize() { return batchSelection.pending.size + batchSelection.retry.size; }
+
+function updateSelectionControls() {
+  const pending = batchSelection.pending.size, retry = batchSelection.retry.size;
+  $("cancel-selected").textContent = `取消选中待下载（${pending}）`;
+  $("retry-selected").textContent = `重试选中未完成（${retry}）`;
+  $("cancel-selected").disabled = batchBusy || pending === 0;
+  $("retry-selected").disabled = batchBusy || retry === 0;
+  for (const [scope, section] of [["pending", "active-selection"], ["retry", "history-selection"]]) {
+    $(section).querySelector(".selection-count").textContent = `两个区域共选 ${selectionSize()} / 10 项`;
+    const list = scope === "pending" ? $("active-list") : $("job-list");
+    for (const label of list.querySelectorAll(".job-select")) {
+      label.hidden = !$(section).open;
+      const checkbox = label.querySelector("input");
+      checkbox.checked = batchSelection[scope].has(checkbox.value);
+      checkbox.disabled = batchBusy;
+    }
+  }
+  $("select-pending").disabled = batchBusy || !activeJobs.some((job) => job.status === "pending");
+  $("select-retryable").disabled = batchBusy || !jobs.some((job) => retryableStates.has(job.status));
+  $("clear-pending-selection").disabled = batchBusy || pending === 0;
+  $("clear-history-selection").disabled = batchBusy || retry === 0;
+}
+
+function clearHistorySelection() {
+  batchSelection.retry.clear();
+  updateSelectionControls();
+}
+
+function reconcileSelection() {
+  let removed = 0;
+  for (const [scope, list, eligible] of [["pending", activeJobs, (job) => job.status === "pending"], ["retry", jobs, (job) => retryableStates.has(job.status)]]) {
+    const available = new Set(list.filter(eligible).map((job) => job.id));
+    for (const id of batchSelection[scope]) if (!available.has(id)) { batchSelection[scope].delete(id); ++removed; }
+  }
+  if (removed) notice("batch-operation-notice", `${removed} 项已离开可选状态，本次选择已跳过。`);
+}
+
+function selectVisible(scope) {
+  const eligible = scope === "pending" ? activeJobs.filter((job) => job.status === "pending") : jobs.filter((job) => retryableStates.has(job.status));
+  for (const job of eligible) {
+    if (selectionSize() >= 10) break;
+    batchSelection[scope].add(job.id);
+  }
+  if (eligible.some((job) => !batchSelection[scope].has(job.id))) notice("batch-operation-notice", "最多同时选择 10 项，请分批处理。");
+  updateSelectionControls();
+}
+
+async function runBatchAction(scope) {
+  if (batchBusy || !batchSelection[scope].size) return;
+  const ids = [...batchSelection[scope]];
+  const originalJobs = new Map([...jobs, ...activeJobs].map((job) => [job.id, job]));
+  batchBusy = true;
+  updateSelectionControls();
+  notice("action-error", "");
+  try {
+    const report = await api(`/api/jobs/batch/${scope === "pending" ? "cancel" : "retry"}`, { ids });
+    // Keep rejected items selected when they remain eligible, so capacity failures are easy to retry.
+    for (const result of report.results) if (["queued", "cancelled", "saved", "already_queued", "not_pending", "not_retryable", "not_found"].includes(result.status)) batchSelection[scope].delete(result.id);
+    renderBatchResults(report, ids.map((id) => originalJobs.get(id)?.source_url || id));
+    const counts = report.summary;
+    const message = scope === "pending" ? `已取消 ${counts.cancelled || 0} 项` : `已加入队列 ${counts.queued || 0} 项`;
+    const skipped = counts.total - (counts[scope === "pending" ? "cancelled" : "queued"] || 0);
+    await refreshJobs();
+    notice("batch-operation-notice", `${message}${skipped ? `，另有 ${skipped} 项请查看逐项结果。` : "。"}`);
+  } catch (error) { notice("action-error", error.message); }
+  finally { batchBusy = false; updateSelectionControls(); }
 }
 
 function size(bytes) {
@@ -171,6 +277,7 @@ function action(text, className, perform, key) {
 
 async function addJob() {
   clearTimeout(searchTimer);
+  clearHistorySelection();
   history.q = ""; history.status = "all"; history.page = 1;
   $("collection-search").value = "";
   $("collection-status").value = "all";
@@ -214,18 +321,38 @@ function offerDuplicate(error, request) {
     await api("/api/jobs", { ...request, force_download: true });
     $("duplicate-notice").hidden = true;
     if ($("work-input").value.trim() === request.input) $("work-input").value = "";
+    updateInputCount();
     await addJob();
   }));
   $("duplicate-notice").hidden = false;
   return true;
 }
 
-function buildCard(job) {
+function buildCard(job, selectionScope = null) {
   const gallery = job.kind === "gallery";
   const card = element("article", "job-card");
   card.dataset.jobId = job.id;
   card.append(element("div", `job-icon ${gallery ? "gallery" : ""}`, gallery ? "▧" : "▶"));
   const body = element("div", "job-body"), top = element("div", "job-top");
+  if ((selectionScope === "pending" && job.status === "pending") || (selectionScope === "retry" && retryableStates.has(job.status))) {
+    const label = element("label", "job-select");
+    const checkbox = element("input");
+    checkbox.type = "checkbox";
+    checkbox.value = job.id;
+    checkbox.dataset.focusKey = "batch-select";
+    checkbox.setAttribute("aria-label", `选择${selectionScope === "pending" ? "待下载" : "可重试"}任务：${title(job)}`);
+    checkbox.checked = batchSelection[selectionScope].has(job.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked && selectionSize() >= 10) {
+        checkbox.checked = false;
+        notice("batch-operation-notice", "最多同时选择 10 项，请分批处理。");
+      } else if (checkbox.checked) batchSelection[selectionScope].add(job.id);
+      else batchSelection[selectionScope].delete(job.id);
+      updateSelectionControls();
+    });
+    label.append(checkbox, document.createTextNode(selectionScope === "pending" ? "选择待下载" : "选择重试"));
+    body.append(label);
+  }
   top.append(element("h3", "job-title", title(job)));
   top.append(element("span", `job-status ${job.status}`, labels[job.status] || "等待更新"));
   body.append(top);
@@ -361,6 +488,7 @@ function buildCard(job) {
 }
 
 function renderJobs() {
+  reconcileSelection();
   const focused = document.activeElement;
   const focusJob = focused?.closest("#workspace-view [data-job-id]")?.dataset.jobId;
   const focusKey = focused?.dataset.focusKey;
@@ -380,24 +508,25 @@ function renderJobs() {
   $("page-info").textContent = `第 ${history.page} / ${pageCount} 页`;
   $("previous-page").disabled = history.page <= 1;
   $("next-page").disabled = history.page >= pageCount;
-  renderCardList($("job-list"), jobs, cards);
-  renderCardList($("active-list"), activeJobs, activeCards);
+  renderCardList($("job-list"), jobs, cards, "retry");
+  renderCardList($("active-list"), activeJobs, activeCards, "pending");
+  updateSelectionControls();
   if (focusJob && focusKey) {
     const entry = cards.get(focusJob) || activeCards.get(focusJob);
     [...(entry?.node.querySelectorAll("[data-focus-key]") || [])].find((item) => item.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
   }
 }
 
-function renderCardList(list, items, entries) {
+function renderCardList(list, items, entries, selectionScope = null) {
   const visible = new Set(items.map((job) => job.id));
   for (const [id, entry] of entries) {
     if (!visible.has(id)) { entry.node.remove(); entries.delete(id); }
   }
   items.forEach((job, index) => {
-    const signature = JSON.stringify(job);
+    const signature = `${selectionScope}:` + JSON.stringify(job);
     let entry = entries.get(job.id);
     if (!entry || entry.signature !== signature) {
-      const node = buildCard(job);
+      const node = buildCard(job, selectionScope);
       const expanded = [...(entry?.node.querySelectorAll("details") || [])].filter((item) => item.open).map((item) => item.className);
       const focusKey = entry?.node.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
       for (const className of expanded) {
@@ -516,6 +645,7 @@ function changePage(offset) {
   const lastPage = Math.max(1, Math.ceil(total / history.page_size));
   const nextPage = Math.max(1, Math.min(lastPage, history.page + offset));
   if (nextPage === history.page) return;
+  clearHistorySelection();
   history.page = nextPage;
   $("previous-page").disabled = true;
   $("next-page").disabled = true;
@@ -539,12 +669,14 @@ for (const id of ["preview-video", "preview-audio", "preview-image"]) $(id).addE
 });
 
 $("collection-search").addEventListener("input", () => {
+  clearHistorySelection();
   history.q = $("collection-search").value.trim(); history.page = 1;
   ++requestVersion;
   clearTimeout(searchTimer);
   searchTimer = setTimeout(refreshJobs, 250);
 });
 $("collection-status").addEventListener("change", () => {
+  clearHistorySelection();
   history.status = $("collection-status").value; history.page = 1;
   refreshJobs();
 });
@@ -562,6 +694,28 @@ $("clear-failed").addEventListener("click", async () => {
   finally { $("clear-failed").disabled = false; }
 });
 $("video-limit").addEventListener("input", updateLimit);
+$("work-input").addEventListener("input", updateInputCount);
+$("refill-batch-links").addEventListener("click", () => {
+  const current = $("work-input").value.trim();
+  const present = new Set(inputLinks(current));
+  const additions = unacceptedBatchLinks.filter((url) => !present.has(url));
+  const text = [current, ...additions].filter(Boolean).join("\n");
+  if (text.length > 4096) {
+    notice("submit-error", "追加后超过 4096 字，请先处理当前输入；未接收链接仍可通过回填按钮取回。");
+    return;
+  }
+  $("work-input").value = text;
+  updateInputCount();
+  $("work-input").focus();
+});
+$("active-selection").addEventListener("toggle", updateSelectionControls);
+$("history-selection").addEventListener("toggle", updateSelectionControls);
+$("select-pending").addEventListener("click", () => selectVisible("pending"));
+$("select-retryable").addEventListener("click", () => selectVisible("retry"));
+$("clear-pending-selection").addEventListener("click", () => { batchSelection.pending.clear(); updateSelectionControls(); });
+$("clear-history-selection").addEventListener("click", clearHistorySelection);
+$("cancel-selected").addEventListener("click", () => runBatchAction("pending"));
+$("retry-selected").addEventListener("click", () => runBatchAction("retry"));
 $("video-limit").addEventListener("invalid", (event) => {
   event.preventDefault();
   $("download-options").open = true;
@@ -570,17 +724,35 @@ $("video-limit").addEventListener("invalid", (event) => {
 });
 $("job-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (submitting) return;
+  submitting = true;
   $("submit-button").disabled = true;
   notice("submit-error", ""); notice("submit-success", "");
   $("duplicate-notice").hidden = true;
   let request;
   try {
     request = { input: $("work-input").value.trim(), video_limit_mib: selectedLimit(), include_audio: $("include-audio").checked };
-    await api("/api/jobs", request);
-    $("work-input").value = "";
-    await addJob();
+    const links = inputLinks(request.input);
+    if (links.length > 10) throw new Error("一次最多提交 10 条链接，请分批添加；重复链接也计入数量。");
+    if (links.length > 1) {
+      const report = await api("/api/jobs/batch", request);
+      const unaccepted = report.results.filter((result) => !["queued", "saved", "already_queued"].includes(result.status)).map((result) => links[result.index - 1]);
+      // Never overwrite edits made while the request was in flight.
+      const inputPreserved = $("work-input").value.trim() === request.input;
+      if (inputPreserved) $("work-input").value = unaccepted.join("\n");
+      renderBatchResults(report, links, unaccepted, inputPreserved);
+      if (report.summary.queued) await addJob();
+      else await refreshJobs();
+      notice("submit-success", `已加入队列 ${report.summary.queued || 0} 项${unaccepted.length ? `，${unaccepted.length} 条未接收链接${inputPreserved ? "保留在输入框" : "可从结果中回填"}。` : "。"}`);
+    } else {
+      await api("/api/jobs", request);
+      if ($("work-input").value.trim() === request.input) $("work-input").value = "";
+      $("batch-results").hidden = true;
+      await addJob();
+    }
+    updateInputCount();
   } catch (error) { if (!request || !offerDuplicate(error, request)) notice("submit-error", error.message); }
-  finally { $("submit-button").disabled = false; }
+  finally { submitting = false; $("submit-button").disabled = false; }
 });
 
 async function start() {

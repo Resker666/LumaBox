@@ -15,8 +15,10 @@ from .store import JobStore
 from .worker import JobWorker
 from .access import CloudAccess, AccessBoundary, COOKIE
 from .duplicates import DuplicateWorkError
+from .batch import BatchJobs, MAX_BATCH_ITEMS
 
 MESSAGES = {
+    "BATCH_LIMIT": "一次最多处理 10 条链接或任务，请分批提交。",
     "AUDIO_UNAVAILABLE": "请先完成视频下载，再提取音频；本版暂不支持图集配乐。",
     "FILE_IN_USE": "文件正在下载或预览，请停止预览或等待传输完成后再删除。",
     "UNSAFE_DELETE": "目录包含无法确认归属的内容或链接，未执行删除，请检查保存位置。",
@@ -123,6 +125,7 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
     csrf = secrets.token_urlsafe(32)
     store = worker.store if worker is not None else JobStore(config)
     worker = worker if worker is not None else JobWorker(config, store)
+    batches = BatchJobs(store)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -159,6 +162,7 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
                 "data_directory": str(config.data_dir),
                 "video_limit_mib": config.video_limit_mib, "max_video_limit_mib": 8192,
                 "output_directory": str(config.output_dir), "pending_limit": 10, "persistent": True,
+                "batch_limit": MAX_BATCH_ITEMS,
                 "image_limit_mib": 20, "gallery_limit_mib": 200, "gallery_count_limit": 50}
 
     @app.post("/api/jobs", status_code=202)
@@ -170,6 +174,35 @@ def create_app(config: WebConfig, worker: JobWorker | None = None) -> FastAPI:
         if "input" not in body or set(body) - {"input", "video_limit_mib", "force_download", "include_audio"}:
             raise WebError("INVALID_REQUEST")
         return store.create(body["input"], body.get("video_limit_mib", config.video_limit_mib), force_download=body.get("force_download", False), include_audio=body.get("include_audio", False))
+
+    @app.post("/api/jobs/batch", status_code=202)
+    async def submit_batch(request: Request):
+        write_guard(request)
+        if worker.stopping.is_set():
+            raise WebError("SERVER_ERROR", 503)
+        body = await object_body(request)
+        if "input" not in body or set(body) - {"input", "video_limit_mib", "include_audio"}:
+            raise WebError("INVALID_REQUEST")
+        return batches.submit(body["input"], body.get("video_limit_mib", config.video_limit_mib),
+                              include_audio=body.get("include_audio", False))
+
+    @app.post("/api/jobs/batch/cancel", status_code=202)
+    async def cancel_batch(request: Request):
+        write_guard(request)
+        body = await object_body(request)
+        if set(body) != {"ids"}:
+            raise WebError("INVALID_REQUEST")
+        return batches.cancel(body["ids"])
+
+    @app.post("/api/jobs/batch/retry", status_code=202)
+    async def retry_batch(request: Request):
+        write_guard(request)
+        if worker.stopping.is_set():
+            raise WebError("SERVER_ERROR", 503)
+        body = await object_body(request)
+        if set(body) != {"ids"}:
+            raise WebError("INVALID_REQUEST")
+        return batches.retry(body["ids"])
 
     @app.post("/api/jobs/{job_id}/audio", status_code=202)
     async def extract_job_audio(job_id: str, request: Request):
