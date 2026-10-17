@@ -1,8 +1,9 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const labels = { pending: "待下载", running: "下载中", cancelling: "正在取消", cancelled: "已取消", success: "已完成", failed: "未完成", expired: "已过期" };
+const labels = { pending: "待下载", running: "下载中", retry_wait: "等待重试", duplicate: "已有收藏", cancelling: "正在取消", cancelled: "已取消", success: "已完成", failed: "未完成", expired: "已过期" };
 const stages = { browser_start: "启动浏览器", browser_load: "读取作品", media_transfer: "下载媒体", media_verification: "检查文件", publication: "整理收藏" };
 const failures = {
+  CLEANUP_FAILED: "临时文件未能清理，已停止自动重试，请检查保存位置。",
   AUTH_REQUIRED: "此作品需要登录后访问，暂时无法下载。",
   CHALLENGE_REQUIRED: "页面要求访问验证，暂时无法下载。",
   UNSAFE_TARGET: "网络地址校验未通过，请检查网络后重试。",
@@ -13,6 +14,7 @@ const failures = {
   TIMEOUT: "任务超过等待时间，请稍后重试。",
   UNSUPPORTED_MEDIA: "暂时无法确认这条作品的完整媒体。",
   PARSE_CHANGED: "作品页面发生变化，暂时无法读取。",
+  RESULT_PARSE_FAILED: "下载结果读取失败，请重试；此错误不代表媒体文件损坏。",
   VERIFY_FAILED: "文件完整性检查未通过，请重新下载。",
   STORAGE_FULL: "磁盘空间不足，请释放空间或调低视频上限。",
   DEPENDENCY_MISSING: "下载组件尚未安装完整，请检查安装说明。",
@@ -39,10 +41,27 @@ const mediaFailures = {
   MOTION_URL_UNAVAILABLE: "已识别动态照片，但动态片段尚未加载完整，请稍后重试。",
   IMAGES_LOADING: "作品仍在显示默认占位图片，请稍后重试。"
 };
-const history = { q: "", status: "all", page: 1, page_size: 20 };
+const history = { q: "", status: "all", page: 1, page_size: 20, scope: "history" };
+const activeAudio = new Set(["waiting", "pending", "running", "cancelling"]);
+const audioMessages = {
+  waiting: "视频完成后将自动提取音频。", pending: "音频已排队，稍后开始。",
+  running: "正在提取音频…", cancelling: "正在取消音频…", cancelled: "音频已取消，视频已保留。",
+  success: "音频已保存 · M4A", unsupported: "图集暂不提取音频，图片已保留。"
+};
+const audioFailures = {
+  NO_AUDIO: "此视频没有音轨，视频已保留。", SIZE_LIMIT: "音频超过 200 MiB 上限，视频已保留。",
+  STORAGE_FULL: "音频未保存：空间不足，请清理后重试。", DEPENDENCY_MISSING: "音频组件未安装完整，请检查安装说明。",
+  TIMEOUT: "音频提取超时，可稍后重试。", INTERRUPTED: "音频提取已中断，可重试。",
+  VERIFY_FAILED: "音频检查未通过，可重新提取。", AUDIO_FAILED: "音频提取失败，可稍后重试。",
+  CLEANUP_FAILED: "音频临时文件未能清理，请检查保存位置。",
+  RESULT_UNAVAILABLE: "原音频文件已移动或损坏，可重新提取。"
+};
 const cards = new Map();
+const activeCards = new Map();
+const existingCards = new Map();
 let csrf = null, timer = null, searchTimer = null, requestVersion = 0;
-let jobs = [], total = 0, preview = null, previewVersion = 0, remoteMode = false;
+let jobs = [], activeJobs = [], total = 0, preview = null, previewVersion = 0, remoteMode = false;
+let existingJobId = null;
 
 function notice(id, message) {
   $(id).textContent = message || "";
@@ -62,7 +81,7 @@ async function api(path, body) {
   catch { throw new Error("暂时无法连接光匣，请稍后重试。"); }
   const data = await response.json();
   if (response.status === 401 && data.error === "LOGIN_REQUIRED") window.location.replace("/login");
-  if (!response.ok) throw new Error(data.message || "暂时无法完成请求，请稍后重试。");
+  if (!response.ok) throw Object.assign(new Error(data.message || "暂时无法完成请求，请稍后重试。"), { code: data.error, existing: data.existing });
   return data;
 }
 
@@ -141,9 +160,10 @@ function action(text, className, perform, key) {
   button.dataset.focusKey = key || text;
   button.addEventListener("click", async () => {
     button.disabled = true;
-    notice("action-error", "");
+    const errorTarget = button.closest("#existing-dialog") ? "existing-error" : "action-error";
+    notice(errorTarget, "");
     try { await perform(); }
-    catch (error) { notice("action-error", error.message); }
+    catch (error) { notice(errorTarget, error.message); }
     finally { button.disabled = false; }
   });
   return button;
@@ -158,6 +178,48 @@ async function addJob() {
   notice("submit-success", remoteMode ? "已加入光匣，完成后可下载到本机。" : "已加入光匣，完成后自动保存在本机。");
 }
 
+async function showExisting(id, restore = false) {
+  notice("existing-error", "");
+  const job = restore ? await api(`/api/jobs/${encodeURIComponent(id)}/restore`, {}) : await api(`/api/jobs/${encodeURIComponent(id)}`);
+  existingJobId = job.id;
+  renderCardList($("existing-card"), [job], existingCards);
+  if (!$("existing-dialog").open) $("existing-dialog").showModal();
+  await refreshJobs();
+  if (restore) window.dispatchEvent(new Event("lumabox:storage-changed"));
+}
+
+async function showDuplicate(job) {
+  const current = await api(`/api/jobs/${encodeURIComponent(job.id)}`);
+  const target = current.duplicate_target;
+  if (!target) throw new Error("已有收藏文件已不可用，可以重新下载。");
+  if (target.hidden && !job.duplicate_target?.hidden && !window.confirm("这份收藏的记录已移除。恢复并查看吗？")) return;
+  await showExisting(target.id, target.hidden);
+}
+
+function offerDuplicate(error, request) {
+  if (!error.existing) return false;
+  const existing = error.existing;
+  $("duplicate-message").textContent = error.message;
+  const controls = $("duplicate-actions");
+  controls.replaceChildren(action(existing.hidden ? "恢复并查看" : "查看已有任务", "preview-button", () => showExisting(existing.id, existing.hidden)));
+  if (request.include_audio && existing.kind === "video" && existing.match_type === "saved") controls.append(action("补充提取音频", "preview-button", async () => {
+    if (existing.hidden) await api(`/api/jobs/${encodeURIComponent(existing.id)}/restore`, {});
+    await api(`/api/jobs/${encodeURIComponent(existing.id)}/audio`, {});
+    $("duplicate-notice").hidden = true;
+    await addJob();
+    notice("submit-success", "已为已有视频安排音频提取。");
+  }));
+  if (existing.match_type === "saved") controls.append(action("重新下载", "retry-button", async () => {
+    if (!window.confirm("重新下载会保留已有文件，并额外占用空间。继续吗？")) return;
+    await api("/api/jobs", { ...request, force_download: true });
+    $("duplicate-notice").hidden = true;
+    if ($("work-input").value.trim() === request.input) $("work-input").value = "";
+    await addJob();
+  }));
+  $("duplicate-notice").hidden = false;
+  return true;
+}
+
 function buildCard(job) {
   const gallery = job.kind === "gallery";
   const card = element("article", "job-card");
@@ -168,26 +230,47 @@ function buildCard(job) {
   top.append(element("span", `job-status ${job.status}`, labels[job.status] || "等待更新"));
   body.append(top);
   const date = new Date(job.created_at * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-  body.append(element("p", "job-meta", `${date} 添加${job.title && job.work_id ? ` · 作品 ID ${job.work_id}` : ""}`));
-  if (job.source_url) body.append(element("p", "job-source", job.source_url));
+  const savedBytes = job.files.filter((file) => file.mime !== "application/zip").reduce((sum, file) => sum + file.bytes, 0);
+  body.append(element("p", "job-meta", `${date}${savedBytes ? ` · ${size(savedBytes)}` : " 添加"}`));
+  const more = element("details", "job-more");
+  const moreSummary = element("summary", "", "更多");
+  moreSummary.dataset.focusKey = "more";
+  more.append(moreSummary);
+  const moreControls = element("div", "job-controls more-controls");
+  const technical = element("details", "job-details");
+  const technicalSummary = element("summary", "", "任务详情");
+  technicalSummary.dataset.focusKey = "details";
+  technical.append(technicalSummary);
+  if (job.work_id) technical.append(element("p", "job-meta", `作品 ID：${job.work_id}`));
+  if (job.source_url) technical.append(element("p", "job-source", job.source_url));
+  if (job.attempt_count) technical.append(element("p", "job-meta", `第 ${job.attempt_count} / ${job.max_attempts || 2} 次尝试`));
   let detail = "";
   if (job.status === "running") detail = progressText(job);
   if (job.status === "pending") detail = "已加入队列，稍后开始。";
+  if (job.status === "retry_wait") detail = `${failureText(job)} ${Math.max(0, Math.ceil(job.retry_at - Date.now() / 1000))} 秒后自动重试，可随时取消。`;
+  if (job.status === "duplicate") detail = job.duplicate_target ? "此作品已有收藏，本次未保留重复文件。" : "已有收藏文件已不可用，可以重新下载。";
   if (job.status === "cancelling") detail = "正在停止下载并清理未完成文件，请稍候。";
   if (job.status === "cancelled") detail = "下载已取消。需要时可以重新下载。";
   if (job.status === "expired") detail = "旧版临时文件已过期，可以重新保存此作品。";
   if (job.status === "failed") detail = failureText(job);
   if (job.status === "success") {
-    const media = job.files.filter((file) => file.mime !== "application/zip");
+    const media = job.files.filter((file) => file.mime !== "application/zip" && file.mime !== "audio/mp4");
     const motions = gallery ? media.filter((file) => file.mime === "video/mp4").length : 0;
     const description = gallery ? `${job.actual_count} 张图片${motions ? ` · ${motions} 段动态片段` : ""}` : "完整视频";
-    detail = `${description} · ${size(media.reduce((sum, file) => sum + file.bytes, 0))} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
+    detail = `${description} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
+    if (job.storage_state !== "present") detail = "文件删除尚未完成，请到文件管理中处理。";
   }
   if (detail) body.append(element("p", `job-detail ${job.status}`, detail));
+  if (job.attempts?.length) {
+    const log = element("details", "attempt-log");
+    log.append(element("summary", "", "尝试记录"));
+    for (const attempt of job.attempts) log.append(element("p", "job-meta", `第 ${attempt.number} 次：${attempt.error ? failureText({error: attempt.error, error_detail: attempt.detail}) : "文件检查通过"}`));
+    technical.append(log);
+  }
   if (job.status === "failed" && networkFailures[job.error_detail?.network_reason]) {
     const locations = { dns_resolution: "域名解析", page_navigation: "读取作品页面", media_transfer: "下载媒体" };
     const location = [locations[job.error_detail.stage], job.error_detail.host].filter(Boolean).join(" · ");
-    if (location) body.append(element("p", "job-meta", `失败位置：${location}`));
+    if (location) technical.append(element("p", "job-meta", `失败位置：${location}`));
   }
   const snapshot = job.progress || {};
   if (job.status === "running" && job.kind !== "gallery" && snapshot.stage === "media_transfer" && snapshot.bytes_total > 0 && Number.isFinite(snapshot.bytes_received)) {
@@ -198,34 +281,55 @@ function buildCard(job) {
     body.append(meter);
   }
   const controls = element("div", "job-controls");
-  if (["pending", "running"].includes(job.status)) controls.append(action("取消下载", "cancel-button", async () => {
+  const audio = job.audio || { status: "none" };
+  const audioActive = activeAudio.has(audio.status);
+  const audioText = audio.status === "failed" ? audioFailures[audio.error] || audioFailures.AUDIO_FAILED : audioMessages[audio.status];
+  if (audioText) body.append(element("p", `audio-status ${audio.status}`, audioText));
+  if (["pending", "running"].includes(audio.status)) controls.append(action("取消音频", "cancel-button", async () => {
+    await api(`/api/jobs/${encodeURIComponent(job.id)}/audio/cancel`, {});
+    await refreshJobs();
+  }, "cancel-audio"));
+  if (["pending", "running", "retry_wait"].includes(job.status)) controls.append(action("取消下载", "cancel-button", async () => {
     await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, {});
     await refreshJobs();
   }, "cancel"));
-  if (job.status === "success") {
-    if (job.output_directory) body.append(element("p", "job-path", `${remoteMode ? "服务器保存位置" : "保存位置"}：${job.output_directory}`));
+  if (job.status === "success" && job.storage_state === "present") {
+    if (job.output_directory) technical.append(element("p", "job-path", `${remoteMode ? "服务器保存位置" : "保存位置"}：${job.output_directory}`));
     const media = job.files.filter((file) => ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime));
     if (media.length) controls.append(action(gallery ? "预览图集" : "预览视频", "preview-button", () => openPreview(job), "preview"));
-    if (remoteMode) {
+    {
       const primary = job.files.find((file) => file.mime === (gallery ? "application/zip" : "video/mp4"));
       if (primary) {
         const link = element("a", "download-link primary", gallery ? "下载整组 ZIP" : "下载视频");
         link.href = `/api/files/${encodeURIComponent(primary.id)}`;
         link.download = primary.name;
+        link.dataset.focusKey = "download-primary";
         controls.append(link);
       }
     }
-    if (!remoteMode && job.output_directory) controls.append(action("打开文件夹", "folder-button", async () => {
+    if (!remoteMode && job.output_directory) moreControls.append(action("打开文件夹", "folder-button", async () => {
       await api(`/api/jobs/${encodeURIComponent(job.id)}/open-folder`, {});
       notice("submit-success", "已打开保存文件夹。");
     }, "folder"));
+    const audioFile = job.files.find((file) => file.mime === "audio/mp4");
+    if (audioFile) {
+      moreControls.append(action("试听音频", "preview-button", () => openPreview(job, "audio"), "audio-preview"));
+      const link = element("a", "download-link", "下载音频");
+      link.href = `/api/files/${encodeURIComponent(audioFile.id)}`;
+      link.download = audioFile.name;
+      link.dataset.focusKey = "download-audio";
+      moreControls.append(link);
+    } else if (!gallery && !audioActive) moreControls.append(action(audio.status === "failed" ? "重新提取音频" : "提取音频", "preview-button", async () => {
+      await api(`/api/jobs/${encodeURIComponent(job.id)}/audio`, {});
+      await refreshJobs();
+    }, "extract-audio"));
     const extra = element("details", "save-extra");
     const summary = element("summary", "", "另存文件");
     summary.dataset.focusKey = "save";
     extra.append(summary);
     const links = element("div", "file-links");
     const ordered = [...job.files].sort((a, b) => (b.mime === "application/zip") - (a.mime === "application/zip"));
-    for (const file of ordered) {
+    for (const file of ordered.filter((file) => file.mime !== "audio/mp4")) {
       const name = file.mime === "application/zip" ? "另存整组 ZIP" : gallery ? (file.mime === "video/mp4" ? `另存动态片段 ${file.name.split("-")[0]}` : `另存图片 ${file.name.split(".")[0]}`) : "另存视频";
       const link = element("a", "download-link", name);
       link.href = `/api/files/${encodeURIComponent(file.id)}`;
@@ -234,46 +338,75 @@ function buildCard(job) {
       links.append(link);
     }
     extra.append(links);
-    if (!remoteMode || gallery) controls.append(extra);
+    if (!remoteMode || gallery) moreControls.append(extra);
   }
-  if (["failed", "expired", "cancelled"].includes(job.status)) controls.append(action(job.status === "cancelled" ? "重新下载" : "一键重试", "retry-button", async () => {
-    await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { video_limit_mib: selectedLimit() });
-    await addJob();
+  if (job.status === "duplicate" && job.duplicate_target) controls.append(action(job.duplicate_target.hidden ? "恢复并查看" : "查看已有收藏", "preview-button", () => showDuplicate(job)));
+  if (["failed", "expired", "cancelled", "duplicate"].includes(job.status)) controls.append(action(job.status === "cancelled" ? "重新下载" : "一键重试", "retry-button", async () => {
+    const request = { input: job.source_url, video_limit_mib: selectedLimit() };
+    try { await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { video_limit_mib: request.video_limit_mib }); await addJob(); }
+    catch (error) { if (!offerDuplicate(error, request)) throw error; }
   }, "retry"));
-  if (["success", "failed", "expired", "cancelled"].includes(job.status)) controls.append(action("移除记录", "remove-button", async () => {
+  if (["success", "failed", "expired", "cancelled", "duplicate"].includes(job.status) && !audioActive) moreControls.append(action("移除记录", "remove-button", async () => {
     if (!window.confirm(`移除这条收藏记录？已保存的文件会保留在${remoteMode ? "服务器" : "电脑"}上。`)) return;
     await api(`/api/jobs/${encodeURIComponent(job.id)}/remove`, {});
     await refreshJobs();
+    window.dispatchEvent(new Event("lumabox:storage-changed"));
   }, "remove"));
   if (controls.childElementCount) body.append(controls);
+  if (moreControls.childElementCount) more.append(moreControls);
+  if (technical.childElementCount > 1) more.append(technical);
+  if (more.childElementCount > 1) body.append(more);
   card.append(body);
   return card;
 }
 
 function renderJobs() {
+  const focused = document.activeElement;
+  const focusJob = focused?.closest("#workspace-view [data-job-id]")?.dataset.jobId;
+  const focusKey = focused?.dataset.focusKey;
+  for (const [items, destination, source] of [[jobs, cards, activeCards], [activeJobs, activeCards, cards]]) {
+    for (const job of items) if (source.has(job.id)) {
+      destination.set(job.id, source.get(job.id));
+      source.delete(job.id);
+    }
+  }
   $("task-count").textContent = `${total} 份收藏`;
+  $("active-tasks").hidden = activeJobs.length === 0;
+  $("active-count").textContent = `${activeJobs.length} 个任务`;
   $("empty-state").hidden = jobs.length !== 0;
   $("empty-state").querySelector("h3").textContent = history.q || history.status !== "all" ? "没有找到这份收藏" : "光匣里还很安静";
-  $("empty-state").querySelector("p").textContent = history.q || history.status !== "all" ? "试试其他关键词，或切换任务状态。" : "添加第一条链接，把喜欢的瞬间留下来。";
+  $("empty-state").querySelector("p").textContent = history.q || history.status !== "all" ? "试试其他关键词，或切换任务状态。" : activeJobs.length ? "完成的收藏会显示在这里。" : "添加第一条链接，把喜欢的瞬间留下来。";
   const pageCount = Math.max(1, Math.ceil(total / history.page_size));
   $("page-info").textContent = `第 ${history.page} / ${pageCount} 页`;
   $("previous-page").disabled = history.page <= 1;
   $("next-page").disabled = history.page >= pageCount;
-  const list = $("job-list"), visible = new Set(jobs.map((job) => job.id));
-  for (const [id, entry] of cards) {
-    if (!visible.has(id)) { entry.node.remove(); cards.delete(id); }
+  renderCardList($("job-list"), jobs, cards);
+  renderCardList($("active-list"), activeJobs, activeCards);
+  if (focusJob && focusKey) {
+    const entry = cards.get(focusJob) || activeCards.get(focusJob);
+    [...(entry?.node.querySelectorAll("[data-focus-key]") || [])].find((item) => item.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
   }
-  jobs.forEach((job, index) => {
+}
+
+function renderCardList(list, items, entries) {
+  const visible = new Set(items.map((job) => job.id));
+  for (const [id, entry] of entries) {
+    if (!visible.has(id)) { entry.node.remove(); entries.delete(id); }
+  }
+  items.forEach((job, index) => {
     const signature = JSON.stringify(job);
-    let entry = cards.get(job.id);
+    let entry = entries.get(job.id);
     if (!entry || entry.signature !== signature) {
       const node = buildCard(job);
-      const expanded = entry?.node.querySelector("details")?.open;
+      const expanded = [...(entry?.node.querySelectorAll("details") || [])].filter((item) => item.open).map((item) => item.className);
       const focusKey = entry?.node.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
-      if (expanded && node.querySelector("details")) node.querySelector("details").open = true;
+      for (const className of expanded) {
+        const detail = [...node.querySelectorAll("details")].find((item) => item.className === className);
+        if (detail) detail.open = true;
+      }
       if (entry) entry.node.replaceWith(node);
       entry = { node, signature };
-      cards.set(job.id, entry);
+      entries.set(job.id, entry);
       if (focusKey) [...node.querySelectorAll("[data-focus-key]")].find((item) => item.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
     }
     if (list.children[index] !== entry.node) list.insertBefore(entry.node, list.children[index] || null);
@@ -285,9 +418,15 @@ async function refreshJobs() {
   const version = ++requestVersion;
   const query = new URLSearchParams(history);
   try {
-    const result = await api(`/api/jobs?${query}`);
+    const existingId = existingJobId;
+    const [result, active, existing] = await Promise.all([
+      api(`/api/jobs?${query}`), api("/api/jobs/active"),
+      existingId && $("existing-dialog").open ? api(`/api/jobs/${encodeURIComponent(existingId)}`).catch(() => null) : null
+    ]);
     if (version !== requestVersion) return;
+    const previousStates = new Map([...jobs, ...activeJobs].map((job) => [job.id, `${job.status}/${job.audio?.status}`]));
     jobs = result.jobs;
+    activeJobs = active.jobs;
     total = result.total;
     history.page = result.page;
     if (!jobs.length && history.page > 1) {
@@ -295,6 +434,8 @@ async function refreshJobs() {
       return refreshJobs();
     }
     renderJobs();
+    if (existing && existingJobId === existingId && $("existing-dialog").open) renderCardList($("existing-card"), [existing], existingCards);
+    if ([...jobs, ...activeJobs].some((job) => ["success", "failed", "cancelled", "duplicate"].includes(job.status) && previousStates.get(job.id) !== `${job.status}/${job.audio?.status}`)) window.dispatchEvent(new Event("lumabox:storage-changed"));
     notice("connection-error", "");
   } catch {
     if (version === requestVersion) notice("connection-error", "连接暂时中断，正在尝试重新连接…");
@@ -313,9 +454,11 @@ function releasePreview() {
 }
 
 function clearPreviewMedia() {
-  $("preview-video").pause();
-  $("preview-video").removeAttribute("src");
-  $("preview-video").load();
+  for (const id of ["preview-video", "preview-audio"]) {
+    $(id).pause();
+    $(id).removeAttribute("src");
+    $(id).load();
+  }
   $("preview-image").removeAttribute("src");
 }
 
@@ -324,9 +467,11 @@ async function showPreviewFile() {
   const version = ++previewVersion, file = preview.files[preview.index];
   const path = `/api/files/${encodeURIComponent(file.id)}/preview`;
   const gallery = preview.kind === "gallery";
-  const image = file.mime !== "video/mp4";
+  const audio = file.mime === "audio/mp4";
+  const image = file.mime.startsWith("image/");
   clearPreviewMedia();
   $("preview-video").hidden = true;
+  $("preview-audio").hidden = true;
   $("preview-image").hidden = true;
   $("gallery-navigation").hidden = !gallery;
   $("previous-image").disabled = preview.index === 0;
@@ -338,7 +483,7 @@ async function showPreviewFile() {
     const response = await fetch(path, { method: "HEAD", cache: "no-store", mode: "same-origin", credentials: "same-origin", signal: AbortSignal.timeout(12000) });
     if (version !== previewVersion) return;
     if (!response.ok) throw new Error("文件可能已移动或删除，请检查保存位置后重新下载。");
-    const media = image ? $("preview-image") : $("preview-video");
+    const media = image ? $("preview-image") : audio ? $("preview-audio") : $("preview-video");
     if (image) media.alt = `图片 ${preview.index + 1} / ${preview.files.length} · ${file.name}`;
     media.src = path;
     media.hidden = false;
@@ -349,9 +494,9 @@ async function showPreviewFile() {
   }
 }
 
-async function openPreview(job) {
+async function openPreview(job, mode = "media") {
   releasePreview();
-  preview = { kind: job.kind, index: 0, files: job.files.filter((file) => ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime)) };
+  preview = { kind: mode === "audio" ? "audio" : job.kind, index: 0, files: job.files.filter((file) => mode === "audio" ? file.mime === "audio/mp4" : ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime)) };
   if (!preview.files.length) return;
   $("preview-title").textContent = title(job);
   $("preview-identity").textContent = job.work_id ? `作品 ID ${job.work_id}` : "";
@@ -378,6 +523,8 @@ function changePage(offset) {
 }
 
 $("close-preview").addEventListener("click", () => $("preview-dialog").close());
+$("close-existing").addEventListener("click", () => $("existing-dialog").close());
+$("existing-dialog").addEventListener("close", () => { existingJobId = null; existingCards.clear(); $("existing-card").replaceChildren(); });
 $("preview-dialog").addEventListener("close", releasePreview);
 $("preview-dialog").addEventListener("keydown", (event) => {
   if (preview?.kind === "gallery" && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
@@ -387,7 +534,7 @@ $("preview-dialog").addEventListener("keydown", (event) => {
 });
 $("previous-image").addEventListener("click", () => moveImage(-1));
 $("next-image").addEventListener("click", () => moveImage(1));
-for (const id of ["preview-video", "preview-image"]) $(id).addEventListener("error", () => {
+for (const id of ["preview-video", "preview-audio", "preview-image"]) $(id).addEventListener("error", () => {
   if (preview) notice("preview-error", remoteMode ? "无法预览此文件，请尝试下载文件。" : "无法预览此文件，请尝试打开保存文件夹或另存文件。");
 });
 
@@ -408,21 +555,31 @@ $("clear-failed").addEventListener("click", async () => {
   notice("action-error", "");
   try {
     const result = await api("/api/jobs/clear-failed", {});
+    window.dispatchEvent(new Event("lumabox:storage-changed"));
     await refreshJobs();
     notice("submit-success", `已清理 ${result.removed} 条失败记录，已保存的文件保留在${remoteMode ? "服务器" : "电脑"}上。`);
   } catch (error) { notice("action-error", error.message); }
   finally { $("clear-failed").disabled = false; }
 });
 $("video-limit").addEventListener("input", updateLimit);
+$("video-limit").addEventListener("invalid", (event) => {
+  event.preventDefault();
+  $("download-options").open = true;
+  notice("submit-error", "视频上限须为 1～8192 MiB 的整数。");
+  $("video-limit").focus();
+});
 $("job-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   $("submit-button").disabled = true;
   notice("submit-error", ""); notice("submit-success", "");
+  $("duplicate-notice").hidden = true;
+  let request;
   try {
-    await api("/api/jobs", { input: $("work-input").value.trim(), video_limit_mib: selectedLimit() });
+    request = { input: $("work-input").value.trim(), video_limit_mib: selectedLimit(), include_audio: $("include-audio").checked };
+    await api("/api/jobs", request);
     $("work-input").value = "";
     await addJob();
-  } catch (error) { notice("submit-error", error.message); }
+  } catch (error) { if (!request || !offerDuplicate(error, request)) notice("submit-error", error.message); }
   finally { $("submit-button").disabled = false; }
 });
 
@@ -446,6 +603,7 @@ async function start() {
     updateLimit();
     $("submit-button").disabled = false;
     $("clear-failed").disabled = false;
+    window.LumaBoxStorage.init({ request: api, formatSize: size, onChanged: refreshJobs });
     notice("connection-error", "");
     poll();
   } catch {

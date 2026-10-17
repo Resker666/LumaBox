@@ -32,7 +32,7 @@ def client_store(tmp_path):
 def test_pending_cancel_never_claimed_and_can_retry_or_remove(client_store):
     client, store = client_store
     first = store.create(URL)
-    following = store.create(URL)
+    following = store.create("https://v.douyin.com/following/")
     response = client.post(f"/api/jobs/{first['id']}/cancel", json={}, headers=headers(client))
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
@@ -47,7 +47,7 @@ def test_running_cancel_waits_for_cleanup_and_wins_publication_race(client_store
     client, store = client_store
     job = store.create(URL)
     store.claim()
-    store.create(URL)
+    store.create("https://v.douyin.com/following/")
     response = client.post(f"/api/jobs/{job['id']}/cancel", json={}, headers=headers(client))
     assert response.status_code == 200
     assert response.json()["status"] == "cancelling"
@@ -109,7 +109,7 @@ def test_cancel_stops_real_child_cleans_only_its_files_then_runs_next(tmp_path, 
     script = tmp_path / "cancel_child.py"
     script.write_text(source, encoding="utf-8")
     worker = FixtureWorker(config, store, script, media_fixtures[0], "delayed")
-    first, second = store.create(URL), store.create(URL)
+    first, second = store.create(URL), store.create("https://v.douyin.com/following/")
     thread = threading.Thread(target=worker.run_once)
     thread.start()
     try:

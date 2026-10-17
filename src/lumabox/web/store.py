@@ -21,6 +21,10 @@ from ..metadata import normalize_title
 from ..progress import sanitize_snapshot
 from ..diagnostics import public_diagnostics
 from .config import WebConfig, WebError, is_link
+from .retry_policy import MAX_ATTEMPTS, RETRY_DELAY_SECONDS, should_retry
+from .duplicates import DuplicateWorkError, available, find_match
+from .storage import StorageManager
+from .audio import AudioJobs, ACTIVE_AUDIO
 
 ID = re.compile(r"[0-9a-f]{32}")
 
@@ -54,11 +58,26 @@ class JobStore:
             for name, definition in (("video_limit_mib", "INTEGER NOT NULL DEFAULT 100"),
                                      ("error_detail", "TEXT"), ("retry_of", "TEXT"),
                                      ("title", "TEXT"), ("progress", "TEXT NOT NULL DEFAULT '{}'"),
-                                     ("started_at", "REAL"), ("hidden_at", "REAL")):
+                                     ("started_at", "REAL"), ("hidden_at", "REAL"),
+                                     ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("retry_at", "REAL"), ("deadline_at", "REAL"),
+                                     ("attempts", "TEXT NOT NULL DEFAULT '[]'"),
+                                     ("force_download", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("duplicate_of", "TEXT"),
+                                     ("storage_state", "TEXT NOT NULL DEFAULT 'present'"),
+                                     ("purge_root", "TEXT"), ("purge_manifest", "TEXT"),
+                                     ("include_audio", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("audio_state", "TEXT NOT NULL DEFAULT 'none'"),
+                                     ("audio_error", "TEXT"), ("audio_token", "TEXT"), ("audio_root", "TEXT"),
+                                     ("audio_manifest", "TEXT NOT NULL DEFAULT '[]'")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_work ON jobs(work_id,kind)")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_url ON jobs(url)")
             previous = db.execute("SELECT value FROM meta WHERE key='output_root'").fetchone()
             self.previous_output = Path(previous[0]) if previous else config.data_dir / "outputs"
+        self.storage = StorageManager(self)
+        self.audio = AudioJobs(self)
 
     @contextmanager
     def connection(self):
@@ -71,7 +90,10 @@ class JobStore:
             finally:
                 db.close()
 
-    def create(self, text: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB, *, retry_of: str | None = None) -> dict:
+    def create(self, text: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB, *, retry_of: str | None = None,
+               force_download: bool = False, include_audio: bool = False) -> dict:
+        if type(force_download) is not bool or type(include_audio) is not bool:
+            raise WebError("INVALID_REQUEST")
         if not isinstance(text, str) or not 1 <= len(text) <= 4096:
             raise WebError("INVALID_INPUT")
         try:
@@ -85,34 +107,120 @@ class JobStore:
         job_id, now = uuid.uuid4().hex, time.time()
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if retry_of and db.execute("SELECT 1 FROM jobs WHERE retry_of=? AND status IN ('pending','running','retry_wait','cancelling')", (retry_of,)).fetchone():
+                raise WebError("ALREADY_QUEUED", 409)
+            match = find_match(self, db, url=url, work_id=link.work_id, kind=link.kind, force_download=force_download)
+            if match:
+                raise DuplicateWorkError(match)
             if db.execute("SELECT count(*) FROM jobs WHERE status='pending'").fetchone()[0] >= 10:
                 raise WebError("QUEUE_FULL", 409)
-            if retry_of and db.execute("SELECT 1 FROM jobs WHERE retry_of=? AND status IN ('pending','running')", (retry_of,)).fetchone():
-                raise WebError("ALREADY_QUEUED", 409)
-            db.execute("INSERT INTO jobs (id,url,work_id,kind,status,created_at,updated_at,video_limit_mib,retry_of) VALUES (?,?,?,?,?,?,?,?,?)",
-                       (job_id, url, link.work_id, link.kind, "pending", now, now, video_limit_mib, retry_of))
+            db.execute("INSERT INTO jobs (id,url,work_id,kind,status,created_at,updated_at,video_limit_mib,retry_of,force_download,include_audio,audio_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (job_id, url, link.work_id, link.kind, "pending", now, now, video_limit_mib, retry_of, int(force_download), int(include_audio), "waiting" if include_audio else "none"))
         return self.get(job_id)
 
     def retry(self, job_id: str, video_limit_mib: int = DEFAULT_VIDEO_LIMIT_MIB) -> dict:
         self.get(job_id)  # Validate the ID before querying the saved link.
         with self.lock:
             with self.connection() as db:
-                row = db.execute("SELECT url,status FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row["status"] not in ("failed", "expired", "cancelled"):
+                row = db.execute("SELECT url,status,include_audio FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row["status"] not in ("failed", "expired", "cancelled", "duplicate"):
                 raise WebError("NOT_RETRYABLE", 409)
-            return self.create(row["url"], video_limit_mib, retry_of=job_id)
+            return self.create(row["url"], video_limit_mib, retry_of=job_id, include_audio=bool(row["include_audio"]))
+
+    def check_duplicate(self, job_id, work_id, kind):
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND status='running'", (job_id,)).fetchone()
+            if row is None or (row["work_id"] and (row["work_id"] != work_id or row["kind"] != kind)):
+                return None
+            return find_match(self, db, url=row["url"], work_id=work_id, kind=kind,
+                              exclude_id=job_id, force_download=bool(row["force_download"]))
+
+    def mark_duplicate(self, job_id, target_id):
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND status='running'", (job_id,)).fetchone()
+            target = db.execute("SELECT * FROM jobs WHERE id=?", (target_id,)).fetchone()
+            if row is None or target is None:
+                return False
+            match = find_match(self, db, url=row["url"], work_id=target["work_id"], kind=target["kind"],
+                               exclude_id=job_id, force_download=bool(row["force_download"]))
+            if not match or match["id"] != target_id or (row["work_id"] and
+                    (row["work_id"] != target["work_id"] or row["kind"] != target["kind"])):
+                return False
+            db.execute("UPDATE jobs SET status='duplicate',duplicate_of=?,work_id=?,kind=?,title=?,error=NULL,error_detail='{}',audio_state='none',updated_at=? WHERE id=?",
+                       (target_id, target["work_id"], target["kind"], target["title"], time.time(), job_id))
+            supplement = bool(row["include_audio"]) and target["kind"] == "video" and target["status"] == "success" and target["hidden_at"] is None
+        if supplement:
+            try:
+                self.audio.request(target_id)
+            except WebError:
+                with self.connection() as db:
+                    db.execute("UPDATE jobs SET audio_state='failed',audio_error='AUDIO_FAILED' WHERE id=?", (job_id,))
+        return True
+
+    def restore(self, job_id):
+        if not isinstance(job_id, str) or not ID.fullmatch(job_id):
+            raise WebError("NOT_FOUND", 404)
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise WebError("NOT_FOUND", 404)
+            if row["status"] != "success" or row["storage_state"] != "present" or not available(self, db, job_id):
+                raise WebError("RESULT_UNAVAILABLE", 409)
+            db.execute("UPDATE jobs SET hidden_at=NULL WHERE id=?", (job_id,))
+        self.storage.invalidate()
+        return self.get(job_id)
 
     def claim(self) -> dict | None:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','cancelling')").fetchone():
                 return None
+            waiting = db.execute("SELECT * FROM jobs WHERE status='retry_wait' AND hidden_at IS NULL ORDER BY created_at LIMIT 1").fetchone()
+            if waiting is not None:
+                return dict(waiting)
             row = db.execute("SELECT * FROM jobs WHERE status='pending' AND hidden_at IS NULL ORDER BY created_at,rowid LIMIT 1").fetchone()
             if row is None:
                 return None
             now = time.time()
-            db.execute("UPDATE jobs SET status='running',updated_at=?,started_at=? WHERE id=?", (now, now, row["id"]))
-            return {**dict(row), "status": "running", "started_at": now}
+            deadline = now + self.config.task_timeout
+            db.execute("UPDATE jobs SET status='running',updated_at=?,started_at=?,deadline_at=?,attempt_count=1 WHERE id=?",
+                       (now, now, deadline, row["id"]))
+            return {**dict(row), "status": "running", "started_at": now, "deadline_at": deadline, "attempt_count": 1}
+
+    @staticmethod
+    def _attempt(db, row, error, detail, now):
+        attempts = json.loads(row["attempts"] or "[]")
+        number = row["attempt_count"]
+        if number and not any(a["number"] == number for a in attempts):
+            attempts.append({"number": number, "ended_at": now, "error": error, "detail": detail})
+            db.execute("UPDATE jobs SET attempts=? WHERE id=?", (json.dumps(attempts[-MAX_ATTEMPTS:]), row["id"]))
+
+    def schedule_retry(self, job_id: str, error: str, result: dict, *, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        result = result if isinstance(result, dict) else {}
+        detail = public_diagnostics(result.get("diagnostics"))
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
+            if (row is None or row["status"] != "running" or row["attempt_count"] != 1 or
+                    not row["deadline_at"] or now + RETRY_DELAY_SECONDS >= row["deadline_at"] or
+                    not should_retry(error, detail)):
+                return False
+            self._attempt(db, row, error, detail, now)
+            db.execute("UPDATE jobs SET status='retry_wait',retry_at=?,error=?,error_detail=?,updated_at=? WHERE id=?",
+                       (now + RETRY_DELAY_SECONDS, error, json.dumps(detail), now, job_id))
+        return True
+
+    def begin_retry(self, job_id: str, *, now: float | None = None) -> dict | None:
+        now = time.time() if now is None else now
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if (row is None or row["status"] != "retry_wait" or row["attempt_count"] != 1 or
+                    now < row["retry_at"] or now >= row["deadline_at"]):
+                return None
+            db.execute("UPDATE jobs SET status='running',attempt_count=2,retry_at=NULL,error=NULL,error_detail='{}',progress='{}',updated_at=? WHERE id=?",
+                       (now, job_id))
+            return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
     def get(self, job_id: str) -> dict:
         if not ID.fullmatch(job_id):
@@ -126,11 +234,29 @@ class JobStore:
             result.update(source_url=row["url"], video_limit_mib=row["video_limit_mib"],
                           error_detail=json.loads(row["error_detail"] or "{}"), output_directory=None, files=[],
                           title=normalize_title(row["title"]), progress=json.loads(row["progress"] or "{}"))
+            result.update(attempt_count=row["attempt_count"], max_attempts=MAX_ATTEMPTS,
+                          retry_at=row["retry_at"], attempts=json.loads(row["attempts"] or "[]"))
+            result.update(duplicate_of=row["duplicate_of"], storage_state=row["storage_state"])
+            result.update(include_audio=bool(row["include_audio"]), audio={"status": row["audio_state"], "error": row["audio_error"]})
+            if row["status"] == "duplicate":
+                target = db.execute("SELECT * FROM jobs WHERE id=?", (row["duplicate_of"],)).fetchone()
+                result["duplicate_target"] = (
+                    {"id": target["id"], "hidden": target["hidden_at"] is not None}
+                    if target and target["status"] == "success" and target["storage_state"] == "present"
+                    and available(self, db, target["id"]) else None)
             if row["started_at"] is not None:
-                end = time.time() if row["status"] in ("running", "cancelling") else row["updated_at"]
+                end = time.time() if row["status"] in ("running", "cancelling", "retry_wait") else row["updated_at"]
                 result["progress"]["elapsed_seconds"] = max(0, int(end - row["started_at"]))
-            if row["status"] == "success":
-                result["files"] = [self.public_file(f) for f in db.execute("SELECT * FROM files WHERE job_id=? ORDER BY rowid", (job_id,))]
+            if row["status"] == "success" and row["storage_state"] == "present":
+                for file in db.execute("SELECT * FROM files WHERE job_id=? ORDER BY rowid", (job_id,)):
+                    if file["mime"] == "audio/mp4":
+                        try:
+                            self.file_path(file)
+                        except (WebError, OSError):
+                            continue  # Keep its ownership index for explicit deletion.
+                    result["files"].append(self.public_file(file))
+                if row["audio_state"] == "success" and not any(f["mime"] == "audio/mp4" for f in result["files"]):
+                    result["audio"] = {"status": "failed", "error": "RESULT_UNAVAILABLE"}
                 first = db.execute("SELECT relative_path FROM files WHERE job_id=? ORDER BY rowid LIMIT 1", (job_id,)).fetchone()
                 if first:
                     try:
@@ -144,13 +270,16 @@ class JobStore:
             ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE hidden_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 30")]
         return [self.get(job_id) for job_id in ids]
 
-    def search(self, q="", status="all", page=1, page_size=20) -> dict:
+    def search(self, q="", status="all", page=1, page_size=20, *, scope="all") -> dict:
         if (not isinstance(q, str) or len(q) > 200 or
-                status not in ("all", "pending", "running", "cancelling", "cancelled", "success", "failed", "expired") or
+                status not in ("all", "pending", "running", "retry_wait", "duplicate", "cancelling", "cancelled", "success", "failed", "expired") or
                 type(page) is not int or not 1 <= page <= 1_000_000 or
-                type(page_size) is not int or not 1 <= page_size <= 100):
+                type(page_size) is not int or not 1 <= page_size <= 100 or scope not in ("all", "history")):
             raise WebError("INVALID_REQUEST")
         clauses, parameters = ["hidden_at IS NULL"], []
+        if scope == "history":
+            clauses.extend(["status NOT IN ('pending','running','retry_wait','cancelling')",
+                            "audio_state NOT IN ('pending','running','cancelling')"])
         if status != "all":
             clauses.append("status=?")
             parameters.append(status)
@@ -167,27 +296,42 @@ class JobStore:
             jobs = [self.get(job_id) for job_id in ids]
         return {"jobs": jobs, "total": total, "page": page, "page_size": page_size}
 
+    def active(self):
+        with self.lock:
+            with self.connection() as db:
+                ids = [r[0] for r in db.execute("""SELECT id FROM jobs WHERE hidden_at IS NULL AND storage_state='present'
+                    AND (status IN ('pending','running','retry_wait','cancelling') OR
+                         (status='success' AND audio_state IN ('pending','running','cancelling')))
+                    ORDER BY CASE WHEN status='pending' THEN 1 ELSE 0 END,created_at,rowid""")]
+            return [self.get(job_id) for job_id in ids]
+
     def remove(self, job_id: str) -> int:
         with self.lock:
             job = self.get(job_id)
-            if job["status"] in ("pending", "running", "cancelling"):
+            if job["status"] in ("pending", "running", "retry_wait", "cancelling") or job["audio"]["status"] in ACTIVE_AUDIO:
                 raise WebError("JOB_ACTIVE", 409)
             with self.connection() as db:
-                return db.execute("UPDATE jobs SET hidden_at=? WHERE id=? AND hidden_at IS NULL", (time.time(), job_id)).rowcount
+                count = db.execute("UPDATE jobs SET hidden_at=? WHERE id=? AND hidden_at IS NULL", (time.time(), job_id)).rowcount
+            self.storage.invalidate()
+            return count
 
     def clear_failed(self) -> int:
         with self.connection() as db:
-            return db.execute("UPDATE jobs SET hidden_at=? WHERE status='failed' AND hidden_at IS NULL", (time.time(),)).rowcount
+            count = db.execute("UPDATE jobs SET hidden_at=? WHERE status='failed' AND hidden_at IS NULL", (time.time(),)).rowcount
+        self.storage.invalidate()
+        return count
 
     def cancel(self, job_id: str) -> dict:
         with self.lock:
             job = self.get(job_id)
-            if job["status"] not in ("pending", "running", "cancelling", "cancelled"):
+            if job["status"] not in ("pending", "running", "retry_wait", "cancelling", "cancelled"):
                 raise WebError("NOT_CANCELLABLE", 409)
-            status = {"pending": "cancelled", "running": "cancelling"}.get(job["status"])
+            status = {"pending": "cancelled", "retry_wait": "cancelled", "running": "cancelling"}.get(job["status"])
             if status:
                 with self.connection() as db:
                     db.execute("UPDATE jobs SET status=?,updated_at=? WHERE id=?", (status, time.time(), job_id))
+                    if status == "cancelled":
+                        db.execute("UPDATE jobs SET audio_state='none' WHERE id=? AND audio_state='waiting'", (job_id,))
             return self.get(job_id)
 
     def is_cancelling(self, job_id: str) -> bool:
@@ -226,16 +370,21 @@ class JobStore:
 
     def finish(self, job_id: str, result: dict, files: list[dict]):
         with self.connection() as db:
-            row = db.execute("SELECT status,work_id,kind FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND hidden_at IS NULL", (job_id,)).fetchone()
             if (row is None or row["status"] != "running" or
                     (row["work_id"] and (row["work_id"] != result["work_id"] or row["kind"] != result["kind"]))):
                 raise WebError("VERIFY_FAILED")
+            self._attempt(db, row, None, {}, time.time())
             for file in files:
                 db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?)", (
                     uuid.uuid4().hex, job_id, file["relative_path"], file["name"], file["bytes"], file["sha256"],
                     file["mime"], file.get("width"), file.get("height"), file.get("duration")))
             db.execute("UPDATE jobs SET status='success',work_id=?,kind=?,title=COALESCE(?,title),expected_count=?,actual_count=?,updated_at=? WHERE id=?",
                        (result["work_id"], result["kind"], normalize_title(result.get("title")), result["expected_count"], result["actual_count"], time.time(), job_id))
+            if row["include_audio"]:
+                db.execute("UPDATE jobs SET audio_state=?,audio_error=NULL WHERE id=?",
+                           ("pending" if result["kind"] == "video" else "unsupported", job_id))
+        self.storage.invalidate()
 
     def fail(self, job_id: str, error: str, result: dict | None = None):
         result = result if isinstance(result, dict) else {}
@@ -243,22 +392,26 @@ class JobStore:
         diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
         detail = public_diagnostics(diagnostics)
         with self.connection() as db:
-            row = db.execute("SELECT work_id,kind,status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is not None and row["status"] == "cancelling":
                 db.execute("UPDATE jobs SET status='cancelled',error=NULL,error_detail='{}',updated_at=? WHERE id=?", (time.time(), job_id))
+                db.execute("UPDATE jobs SET audio_state='none' WHERE id=? AND audio_state='waiting'", (job_id,))
                 return
-            if row is None or row["status"] not in ("pending", "running"):
+            if row is None or row["status"] not in ("pending", "running", "retry_wait"):
                 return
+            self._attempt(db, row, error, detail, time.time())
             work_id, kind = result.get("work_id"), result.get("kind")
             if (isinstance(work_id, str) and re.fullmatch(r"\d{15,20}", work_id) and kind in ("video", "gallery") and
                     row and (row["work_id"] is None or (row["work_id"] == work_id and row["kind"] == kind))):
                 db.execute("UPDATE jobs SET work_id=?,kind=?,title=COALESCE(?,title) WHERE id=?", (work_id, kind, normalize_title(result.get("title")), job_id))
-            db.execute("UPDATE jobs SET status='failed',error=?,error_detail=?,updated_at=? WHERE id=? AND status IN ('pending','running')",
+            db.execute("UPDATE jobs SET status='failed',error=?,error_detail=?,updated_at=? WHERE id=? AND status IN ('pending','running','retry_wait')",
                        (error, json.dumps(detail), time.time(), job_id))
+            db.execute("UPDATE jobs SET audio_state='none' WHERE id=? AND audio_state='waiting'", (job_id,))
 
     def recover(self):
+        self.audio.recover()
         with self.connection() as db:
-            ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling')")]
+            ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling') AND storage_state='present'")]
         for job_id in ids:
             self.fail(job_id, "INTERRUPTED")
             self.try_cleanup(job_id)
@@ -267,7 +420,7 @@ class JobStore:
         if not ID.fullmatch(file_id):
             raise WebError("NOT_FOUND", 404)
         with self.connection() as db:
-            row = db.execute("SELECT files.* FROM files JOIN jobs ON jobs.id=files.job_id WHERE files.id=? AND jobs.status='success' AND jobs.hidden_at IS NULL", (file_id,)).fetchone()
+            row = db.execute("SELECT files.* FROM files JOIN jobs ON jobs.id=files.job_id WHERE files.id=? AND jobs.status='success' AND jobs.hidden_at IS NULL AND jobs.storage_state='present'", (file_id,)).fetchone()
             if row is None:
                 raise WebError("NOT_FOUND", 404)
             return dict(row)
@@ -302,8 +455,14 @@ class JobStore:
     def migrate_outputs(self):
         old, new = self.previous_output, self.config.output_dir
         if old != new:
+            # Recover derived outputs at their recorded root before copying an
+            # installation; copied files acquire different filesystem identities.
+            self.audio.recover(root=old)
             with self.connection() as db:
-                rows = [dict(row) for row in db.execute("SELECT files.* FROM files JOIN jobs ON files.job_id=jobs.id WHERE jobs.status='success'")]
+                if db.execute("SELECT 1 FROM jobs WHERE audio_error='CLEANUP_FAILED' AND audio_root=?", (str(old),)).fetchone():
+                    raise WebError("MIGRATION_FAILED")
+            with self.connection() as db:
+                rows = [dict(row) for row in db.execute("SELECT files.* FROM files JOIN jobs ON files.job_id=jobs.id WHERE jobs.status='success' AND jobs.storage_state='present'")]
             grouped = {}
             for row in rows:
                 grouped.setdefault(row["job_id"], []).append(row)
@@ -348,8 +507,11 @@ class JobStore:
                     if temporary.exists() and temporary.resolve().parent == new and not is_link(temporary):
                         shutil.rmtree(temporary)
         with self.connection() as db:
+            if old != new:
+                db.execute("UPDATE jobs SET audio_token=NULL,audio_root=NULL,audio_manifest='[]' WHERE audio_state='success' AND audio_root=?", (str(old),))
             db.execute("INSERT OR REPLACE INTO meta VALUES ('output_root',?)", (str(new),))
         self.previous_output = new
+        self.storage.invalidate()
 
     def file_path(self, file: dict) -> Path:
         path = self.safe_path(file["relative_path"])
@@ -380,14 +542,24 @@ class JobStore:
     def try_cleanup(self, job_id: str) -> bool:
         try:
             self.cleanup(job_id)
+            self.storage.invalidate()
             return True
         except (OSError, WebError):
             logging.getLogger(__name__).warning("Private output cleanup deferred; will retry at expiry.")
             return False
 
     def cleanup(self, job_id: str):
+        # Keep lifecycle validation and deletion atomic with explicit purge.
+        with self.lock:
+            self._cleanup(job_id)
+
+    def _cleanup(self, job_id: str):
         if not ID.fullmatch(job_id):
             raise WebError("INVALID_CONFIG")
+        with self.connection() as db:
+            row = db.execute("SELECT storage_state FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row and row["storage_state"] != "present":
+            raise WebError("UNSAFE_DELETE", 409)
         path = self.config.output_dir / job_id
         if not path.exists():
             return
@@ -421,17 +593,19 @@ class JobStore:
     def expire(self, now: float | None = None):
         if self.config.retention_seconds is None:
             with self.connection() as db:
-                failed = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('failed','cancelled')")]
+                failed = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status IN ('failed','cancelled') AND storage_state='present'")]
             for job_id in failed:
                 self.try_cleanup(job_id)
             return  # A local collection is permanent; only incomplete outputs are cleaned.
         now = time.time() if now is None else now
         with self.connection() as db:
-            ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE status IN ('success','failed','cancelled') AND updated_at<?",
+            ids = [r[0] for r in db.execute("SELECT id FROM jobs WHERE status IN ('success','failed','cancelled') AND storage_state='present' AND updated_at<?",
                                             (now - self.config.retention_seconds,))]
         for job_id in ids:
             with self.lock:
-                if self.downloads.get(job_id) or not self.try_cleanup(job_id):
+                with self.connection() as db:
+                    current = db.execute("SELECT audio_state FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if self.downloads.get(job_id) or (current and current["audio_state"] in ACTIVE_AUDIO) or not self.try_cleanup(job_id):
                     continue
                 with self.connection() as db:
                     db.execute("UPDATE jobs SET status='expired',updated_at=? WHERE id=?", (now, job_id))

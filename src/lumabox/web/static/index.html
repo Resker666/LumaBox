@@ -7,12 +7,13 @@
   <title>LumaBox · 光匣</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/storage.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <header class="site-header">
     <a class="brand" href="/" aria-label="LumaBox 光匣首页"><span class="brand-mark" aria-hidden="true"><i></i></span><span>LumaBox <small>光匣</small></span></a>
-    <div class="header-actions"><span class="local-label"><i></i> <span id="workspace-label">本地工作台</span></span><button id="logout-button" class="quiet-button" type="button" hidden>退出登录</button></div>
+    <div class="header-actions"><span class="local-label"><i></i> <span id="workspace-label">本地工作台</span></span><button id="open-storage" class="page-button" type="button">文件管理</button><button id="logout-button" class="quiet-button" type="button" hidden>退出登录</button></div>
   </header>
   <main>
     <section id="workspace-view">
@@ -22,15 +23,19 @@
           <div class="section-kicker"><span class="step-tag">01</span><h2 id="composer-heading">添加一份收藏</h2></div>
           <form id="job-form">
             <label for="work-input">作品链接或分享文案</label>
-            <textarea id="work-input" name="input" rows="4" required maxlength="4096" placeholder="粘贴抖音视频、图集链接，或包含链接的分享文案…"></textarea>
-            <div class="input-hint">支持视频、图文作品和短链接</div>
+            <textarea id="work-input" name="input" rows="3" required maxlength="4096" placeholder="粘贴抖音视频、图集链接或分享文案…"></textarea>
             <div class="submit-row">
-              <div class="limit-setting"><label for="video-limit">单视频上限</label><div class="limit-field"><input id="video-limit" type="number" min="1" max="8192" step="1" required value="1024"><span>MiB</span></div></div>
+              <span class="input-hint">支持视频、图集和短链接</span>
               <button id="submit-button" class="primary-button" type="submit" disabled>开始下载 <span aria-hidden="true">↘</span></button>
             </div>
-            <p id="limit-hint" class="input-hint">单视频默认 1 GiB，可调整；不限制视频时长。</p>
+            <details id="download-options" class="download-options"><summary>下载选项</summary><div class="option-fields">
+              <div class="limit-setting"><label for="video-limit">单视频上限</label><div class="limit-field"><input id="video-limit" type="number" min="1" max="8192" step="1" required value="1024"><span>MiB</span></div></div>
+              <p id="limit-hint" class="input-hint">单视频默认 1 GiB，可调整；不限制视频时长。</p>
+              <label class="audio-option" for="include-audio"><input id="include-audio" type="checkbox">同时保存音频</label><p class="input-hint">仅视频：保存 M4A 音频，上限 200 MiB。图集仍按原样下载。</p>
+            </div></details>
             <p id="submit-error" class="form-error" role="alert" hidden></p>
             <p id="submit-success" class="form-success" role="status" hidden></p>
+            <section id="duplicate-notice" class="duplicate-notice" aria-label="已有作品提示" hidden><p id="duplicate-message" role="status"></p><div id="duplicate-actions" class="job-controls"></div></section>
           </form>
         </section>
         <aside class="tips-panel">
@@ -39,14 +44,14 @@
           <div class="tip-divider"></div>
           <div class="tip-detail"><span>有序下载</span><small>一次处理一个作品</small></div>
           <div class="tip-detail"><span>长期保存</span><small>不会自动删除收藏</small></div>
-          <p id="output-label" class="storage-label">默认保存位置</p><p id="output-root" class="storage-path">Output</p>
         </aside>
       </div>
+      <section id="active-tasks" class="active-tasks" aria-labelledby="active-heading" hidden><div class="collection-heading"><div class="section-kicker"><h2 id="active-heading">进行中</h2></div><span id="active-count" class="muted small"></span></div><div id="active-list" class="job-list" aria-label="进行中的下载与音频任务"></div></section>
       <section class="collection" aria-labelledby="collection-heading">
         <div class="collection-heading"><div class="section-kicker"><span class="step-tag">02</span><h2 id="collection-heading">最近的收藏</h2></div><span id="task-count" class="muted small">0 份收藏</span></div>
         <div class="collection-toolbar">
           <div class="search-field"><label class="visually-hidden" for="collection-search">搜索收藏</label><input id="collection-search" type="search" maxlength="200" placeholder="搜索标题、作品 ID 或链接" autocomplete="off"></div>
-          <div class="status-field"><label class="visually-hidden" for="collection-status">任务状态</label><select id="collection-status"><option value="all">全部状态</option><option value="pending">待下载</option><option value="running">下载中</option><option value="cancelling">正在取消</option><option value="cancelled">已取消</option><option value="success">已完成</option><option value="failed">未完成</option><option value="expired">已过期</option></select></div>
+          <div class="status-field"><label class="visually-hidden" for="collection-status">任务状态</label><select id="collection-status"><option value="all">全部状态</option><option value="success">已完成</option><option value="failed">未完成</option><option value="cancelled">已取消</option><option value="duplicate">已有收藏</option><option value="expired">已过期</option></select></div>
           <button id="clear-failed" class="quiet-button" type="button" disabled>清理失败记录</button>
         </div>
         <p id="connection-error" class="form-error" role="status" hidden></p>
@@ -60,8 +65,18 @@
   </main>
   <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title">
     <div class="preview-heading"><div><h2 id="preview-title">预览收藏</h2><p id="preview-identity" class="muted small"></p></div><button id="close-preview" class="page-button" type="button" aria-label="关闭预览">关闭 <span aria-hidden="true">×</span></button></div>
-    <div class="preview-media"><video id="preview-video" controls preload="metadata" hidden></video><img id="preview-image" alt="" hidden><p id="preview-error" class="form-error" role="status" hidden></p><p id="preview-loading" class="muted small" role="status" hidden>正在读取文件…</p></div>
+    <div class="preview-media"><video id="preview-video" controls preload="metadata" hidden></video><audio id="preview-audio" controls preload="metadata" hidden></audio><img id="preview-image" alt="" hidden><p id="preview-error" class="form-error" role="status" hidden></p><p id="preview-loading" class="muted small" role="status" hidden>正在读取文件…</p></div>
     <div id="gallery-navigation" class="gallery-navigation" hidden><button id="previous-image" class="page-button" type="button">上一张</button><span id="image-counter" class="muted small" aria-live="polite"></span><button id="next-image" class="page-button" type="button">下一张</button></div>
+  </dialog>
+  <dialog id="existing-dialog" class="preview-dialog" aria-labelledby="existing-heading"><div class="preview-heading"><h2 id="existing-heading">已有收藏</h2><button id="close-existing" class="page-button" type="button">关闭</button></div><p id="existing-error" class="form-error" role="alert" hidden></p><div id="existing-card"></div></dialog>
+  <dialog id="storage-dialog" class="preview-dialog" aria-labelledby="storage-dialog-title">
+    <div class="preview-heading"><div><h2 id="storage-dialog-title">文件管理</h2><p class="muted small">查看保存的文件，选择保留或清理。</p></div><button id="close-storage" class="page-button" type="button" aria-label="关闭文件管理">关闭</button></div>
+    <section class="storage-overview" aria-label="存储空间"><dl><div><dt>光匣文件</dt><dd id="storage-total">读取中…</dd></div><div><dt>系统可用空间</dt><dd id="storage-free">读取中…</dd></div></dl><p id="storage-updated" class="small muted"></p><p id="storage-health" class="form-error" role="status" hidden></p><p id="output-label" class="storage-label">默认保存位置</p><p id="output-root" class="storage-path">Output</p></section>
+    <p id="storage-summary" class="storage-summary muted"></p><p class="small muted">统计当前保存目录，包含视频、图片、音频、动态片段、ZIP 和报告。系统可用空间由整个磁盘共享；其他/临时文件不提供一键清理。</p>
+    <div class="storage-toolbar"><label for="storage-scope">文件范围</label><select id="storage-scope"><option value="all">全部保留文件</option><option value="hidden">记录已移除</option></select><button id="storage-refresh" class="page-button" type="button">刷新空间</button></div>
+    <p id="storage-error" class="form-error" role="alert" hidden></p><p id="storage-success" class="form-success" role="status" hidden></p>
+    <div id="storage-items" class="job-list" aria-label="保存的作品文件"></div><p id="storage-empty" class="muted small" hidden>这个范围内没有保留文件。</p>
+    <nav class="collection-pagination" aria-label="文件分页"><button id="storage-previous" class="page-button" type="button">上一页</button><span id="storage-page" class="small muted"></span><button id="storage-next" class="page-button" type="button">下一页</button></nav>
   </dialog>
   <footer class="site-footer"><span>LumaBox · 光匣</span><span>给每个值得留住的瞬间，一个位置。</span></footer>
 </body>

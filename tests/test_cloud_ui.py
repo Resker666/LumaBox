@@ -37,7 +37,7 @@ def test_remote_video_and_gallery_are_downloadable_without_local_folder_action(d
     page = context.new_page()
     try:
         page.goto(url)
-        expect(page.get_by_text("粘贴链接，云端保存，随时下载到你的电脑。", exact=True)).to_be_visible()
+        expect(page.get_by_label("作品链接或分享文案")).to_be_visible()
         submit(page, URL)
         expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_be_visible(timeout=10000)
         expect(page.get_by_role("button", name="打开文件夹", exact=True)).to_have_count(0)

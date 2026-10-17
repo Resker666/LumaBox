@@ -11,15 +11,28 @@ from pathlib import Path
 from ..limits import GALLERY_LIMIT, IMAGE_LIMIT, MIB, video_limit_bytes
 from ..metadata import normalize_title
 from ..progress import read_progress
+from ..diagnostics import public_diagnostics
 
 from .config import InstanceLock, WebError
 from .process import ProcessTree
 from .store import ID
+from .retry_policy import should_retry
 
 ERRORS = frozenset({"INVALID_INPUT", "UNSAFE_TARGET", "AUTH_REQUIRED", "BLOCKED", "NOT_FOUND",
                     "RATE_LIMITED", "UNSUPPORTED_MEDIA", "PARSE_CHANGED", "VERIFY_FAILED", "SIZE_LIMIT",
                     "DEPENDENCY_MISSING", "INTERRUPTED", "DOWNLOAD_FAILED", "TIMEOUT", "STORAGE_FULL",
-                    "CHALLENGE_REQUIRED", "RESOURCE_TIMEOUT"})
+                    "CHALLENGE_REQUIRED", "RESOURCE_TIMEOUT", "CLEANUP_FAILED", "RESULT_PARSE_FAILED"})
+
+
+class AttemptFailure(WebError):
+    def __init__(self, code, result):
+        super().__init__(code)
+        self.result = result
+
+
+class DuplicateResult(Exception):
+    def __init__(self, target_id):
+        self.target_id = target_id
 
 
 class JobWorker:
@@ -33,6 +46,7 @@ class JobWorker:
         self.instance = InstanceLock(self.config.data_dir)
         self.instance.__enter__()
         try:
+            self.store.storage.recover_deletions()
             self.store.migrate_outputs()
             self.store.recover()
             self.thread = threading.Thread(target=self._loop, name="lumabox-download", daemon=False)
@@ -78,14 +92,66 @@ class JobWorker:
     def run_once(self) -> bool:
         if self.stopping.is_set():
             return False
+        if self.store.audio.run_once(self.stopping):
+            return True
         job = self.store.claim()
         if job is None:
             return False
+        while job is not None:
+            if job["status"] == "retry_wait":
+                job = self._wait_retry(job)
+                if job is None:
+                    break
+            try:
+                self._run_attempt(job)
+                break
+            except DuplicateResult as duplicate:
+                cleaned = self.store.try_cleanup(job["id"])
+                if not cleaned or not self.store.mark_duplicate(job["id"], duplicate.target_id):
+                    self.store.fail(job["id"], "INTERRUPTED" if self.store.is_cancelling(job["id"]) else "VERIFY_FAILED")
+                break
+            except AttemptFailure as exc:
+                cleaned = self.store.try_cleanup(job["id"])
+                if self.stopping.is_set() or self.store.is_cancelling(job["id"]):
+                    self.store.fail(job["id"], "INTERRUPTED", exc.result)
+                elif not cleaned and should_retry(exc.code, public_diagnostics(exc.result.get("diagnostics"))):
+                    self.store.fail(job["id"], "CLEANUP_FAILED", exc.result)
+                elif cleaned and self.store.schedule_retry(job["id"], exc.code, exc.result):
+                    job = self.store.claim()
+                    continue
+                else:
+                    self.store.fail(job["id"], exc.code, exc.result)
+                break
+        return True
+
+    def _wait_retry(self, job):
+        while not self.stopping.is_set():
+            try:
+                current = self.store.get(job["id"])
+            except WebError as error:
+                if error.code == "NOT_FOUND":
+                    return None  # A cancelled waiter may already be hidden or purged.
+                raise
+            if current["status"] != "retry_wait":
+                return None
+            now = time.time()
+            if now >= job["deadline_at"]:
+                self.store.fail(job["id"], "TIMEOUT")
+                return None
+            if now >= current["retry_at"]:
+                return self.store.begin_retry(job["id"])
+            self.stopping.wait(min(.1, current["retry_at"] - now))
+        return None
+
+    def _run_attempt(self, job):
         directory = self.config.output_dir / job["id"]
         progress_path = directory / ".progress.json"
         last_progress = None
         result = {}
         try:
+            if self.stopping.is_set():
+                raise WebError("INTERRUPTED")
+            self._check_cancelled(job["id"])
             reserve = max(self.config.reserve_bytes, video_limit_bytes(job["video_limit_mib"]) + 64 * MIB, 2 * GALLERY_LIMIT + 64 * MIB)
             if ((self.config.capacity_bytes is not None and self.store.usage() + reserve > self.config.capacity_bytes) or
                     shutil.disk_usage(self.config.output_dir).free < reserve):
@@ -95,36 +161,41 @@ class JobWorker:
             with output.open("xb") as stdout:
                 with ProcessTree(self.command(job, directory), stdout) as tree:
                     process = tree.process
-                    start = time.monotonic()
                     while process.poll() is None:
                         if self.stopping.wait(.05):
                             raise WebError("INTERRUPTED")
                         self._check_cancelled(job["id"])
-                        if time.monotonic() - start > self.config.task_timeout:
-                            raise WebError("TIMEOUT")
                         if output.stat().st_size > 256 * 1024:
-                            raise WebError("VERIFY_FAILED")
+                            raise WebError("RESULT_PARSE_FAILED")
                         if self.config.capacity_bytes is not None and self.store.usage() > self.config.capacity_bytes:
                             raise WebError("STORAGE_FULL")
                         snapshot = self._read_progress(progress_path)
                         if snapshot is not None and snapshot != last_progress:
-                            self.store.update_progress(job["id"], snapshot)
+                            if self.store.update_progress(job["id"], snapshot):
+                                self._check_duplicate(job, snapshot)
                             last_progress = snapshot
             if self.stopping.is_set():
                 raise WebError("INTERRUPTED")
             self._check_cancelled(job["id"])
             if output.stat().st_size > 256 * 1024:
-                raise WebError("VERIFY_FAILED")
+                raise WebError("RESULT_PARSE_FAILED")
             snapshot = self._read_progress(progress_path)
             if snapshot is not None and snapshot != last_progress:
                 self.store.update_progress(job["id"], snapshot)
                 last_progress = snapshot
-            result = json.loads(output.read_bytes().splitlines()[-1])
+            try:
+                decoded = json.loads(output.read_bytes().splitlines()[-1])
+            except (ValueError, IndexError, RecursionError):
+                raise WebError("RESULT_PARSE_FAILED") from None
+            if not isinstance(decoded, dict):
+                raise WebError("RESULT_PARSE_FAILED")
+            result = decoded
             if process.returncode != 0 or result.get("status") != "success":
                 code = result.get("error")
                 raise WebError(code if code in ERRORS else "DOWNLOAD_FAILED")
             self.store.update_progress(job["id"], {**(last_progress or {}), "stage": "publication", "resource_index": None})
             files = self._verify(job, directory, result)
+            self._check_duplicate(job, result)
             if self.config.capacity_bytes is not None and self.store.usage() > self.config.capacity_bytes:
                 raise WebError("STORAGE_FULL")
             self.store.update_progress(job["id"], {"stage": "publication", "work_id": result["work_id"],
@@ -137,15 +208,25 @@ class JobWorker:
                 except OSError:
                     pass  # Private auxiliary files are not part of publication.
             self.store.finish(job["id"], result, files)
+        except DuplicateResult:
+            raise
         except Exception as exc:
             code = exc.code if isinstance(exc, WebError) and exc.code in ERRORS else "VERIFY_FAILED"
-            self.store.try_cleanup(job["id"])
-            self.store.fail(job["id"], code, result)
-        return True
+            raise AttemptFailure(code, result) from None
+
+    def _check_duplicate(self, job, identity):
+        if identity.get("work_id") and identity.get("kind"):
+            match = self.store.check_duplicate(job["id"], identity["work_id"], identity["kind"])
+            if match:
+                raise DuplicateResult(match["id"])
 
     def _check_cancelled(self, job_id):
         if self.store.is_cancelling(job_id):
             raise WebError("INTERRUPTED")
+        with self.store.connection() as db:
+            row = db.execute("SELECT deadline_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is not None and row["deadline_at"] is not None and time.time() >= row["deadline_at"]:
+            raise WebError("TIMEOUT")
 
     def _digest(self, stream, job_id):
         digest = hashlib.sha256()
