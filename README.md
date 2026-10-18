@@ -2,7 +2,7 @@
 
 通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前开发与云端版本为 **0.8.0**（图集原始 MP3 配乐），真实图集 / MP3 下载与旧数据保留见[0.8.0 上线记录](docs/validation/2026-10-18-production-0.8.0.md)。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[0.7.0 上线记录](docs/validation/2026-10-18-production-0.7.0.md)、[0.6.0 上线记录](docs/validation/2026-10-17-production-0.6.0.md)、[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
+当前开发与云端版本为 **0.8.1**（图集原始 MP3 配乐及 sf11 / sf6 节点修复），原失败任务补保存与数据保留见[0.8.1 修复上线记录](docs/validation/2026-10-18-production-0.8.1.md)，完整图集 / MP3 基线见[0.8.0 上线记录](docs/validation/2026-10-18-production-0.8.0.md)。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[0.7.0 上线记录](docs/validation/2026-10-18-production-0.7.0.md)、[0.6.0 上线记录](docs/validation/2026-10-17-production-0.6.0.md)、[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
 
 0.7.0 的批量规则、真实视频 / 图集下载、旧数据升级和手机布局检查见[批量与队列验证](docs/validation/2026-10-17-batch-queue.md)。
 
