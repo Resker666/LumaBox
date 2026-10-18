@@ -24,12 +24,12 @@ def test_observed_lf9_music_node_is_accepted_only_for_audio():
 
 def test_unknown_music_host_reports_only_safe_policy_details():
     snapshot = {"work_id": "7695689642767235187", "kind": "gallery", "scope_confirmed": True,
-                "gallery_music": [{"url": "https://lf27-music-east.douyinstatic.com/private.mp3?signature=secret", "duration": 28.16}]}
+                "gallery_music": [{"url": "https://lf27-music-west.douyinstatic.com/private.mp3?signature=secret", "duration": 28.16}]}
     with pytest.raises(LumaBoxError) as failure:
         extract_gallery_music(snapshot, "7695689642767235187")
     assert failure.value.code == "UNSAFE_TARGET"
     assert failure.value.diagnostics == {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "stage": "media_extraction",
-                                         "host": "lf27-music-east.douyinstatic.com"}
+                                         "host": "lf27-music-west.douyinstatic.com"}
     assert "signature" not in json.dumps(failure.value.diagnostics)
 
 
@@ -48,8 +48,8 @@ def test_malformed_music_url_has_a_fixed_reason_without_private_url(url):
 
 def test_policy_diagnostics_keep_bounded_reason_host_and_stage_only():
     detail = public_diagnostics({"policy_reason": "AUDIO_HOST_UNSUPPORTED", "stage": "media_transfer",
-        "host": "lf27-music-east.douyinstatic.com", "url": "https://example/private?signature=secret", "cookie": "secret"})
-    assert detail == {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "stage": "media_transfer", "host": "lf27-music-east.douyinstatic.com"}
+        "host": "lf27-music-west.douyinstatic.com", "url": "https://example/private?signature=secret", "cookie": "secret"})
+    assert detail == {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "stage": "media_transfer", "host": "lf27-music-west.douyinstatic.com"}
     assert public_diagnostics({"policy_reason": "secret", "stage": "media_transfer", "host": "example.com"}) == {}
     assert public_diagnostics({"policy_reason": "AUDIO_URL_INVALID", "stage": "secret", "host": "bad.example/?signature=secret"}) == {"policy_reason": "AUDIO_URL_INVALID"}
 
@@ -88,7 +88,7 @@ def test_verified_music_redirect_is_followed_but_not_a_new_player_source(monkeyp
 
 
 def test_policy_detail_survives_real_music_child_status(tmp_path, mp3_fixture, monkeypatch):
-    detail = {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "host": "lf27-music-east.douyinstatic.com", "stage": "media_extraction"}
+    detail = {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "host": "lf27-music-west.douyinstatic.com", "stage": "media_extraction"}
     child_fixture(monkeypatch, mp3_fixture, status={"ok": False, "code": "UNSAFE_TARGET", "diagnostics": {
         **detail, "url": "https://example.com/private?signature=secret", "cookie": "secret"}})
     target = tmp_path / "out.mp3"
@@ -99,7 +99,7 @@ def test_policy_detail_survives_real_music_child_status(tmp_path, mp3_fixture, m
 
 
 @pytest.mark.parametrize("detail", [
-    {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "host": "lf27-music-east.douyinstatic.com", "stage": "media_extraction"},
+    {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "host": "lf27-music-west.douyinstatic.com", "stage": "media_extraction"},
     {"network_reason": "DNS_NON_PUBLIC", "host": "www.douyin.com", "stage": "dns_resolution"},
     {"network_reason": "DNS_LOOKUP_FAILED", "host": "lf9-music-east.douyinstatic.com", "stage": "dns_resolution"},
 ])

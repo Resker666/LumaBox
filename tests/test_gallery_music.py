@@ -94,7 +94,7 @@ def test_audio_host_policy_does_not_expand_video_or_image_hosts():
     with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
         urls.validate_media_url(MUSIC)
     for url in ["http://lf26-music-east.douyinstatic.com/a.mp3", "https://lf26-music-east.douyinstatic.com.evil.test/a.mp3",
-                "https://lf27-music-east.douyinstatic.com/a.mp3", "https://v1.douyinvod.com/a.mp3",
+                "https://lf27-music-west.douyinstatic.com/a.mp3", "https://v1.douyinvod.com/a.mp3",
                 MUSIC + "#private", "https://lf26-music-east.douyinstatic.com/a%0d.mp3"]:
         with pytest.raises(LumaBoxError, match="UNSAFE_TARGET"):
             validate(url)

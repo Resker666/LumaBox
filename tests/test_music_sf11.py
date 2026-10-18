@@ -38,10 +38,10 @@ def test_verified_sf_node_can_also_receive_a_music_redirect(monkeypatch, host):
     assert output.getvalue() == b'ID3native'
 
 
-def test_sf11_music_support_does_not_allow_video_image_or_unverified_neighbors():
+def test_sf11_music_support_does_not_allow_video_image_or_unrelated_hosts():
     with pytest.raises(LumaBoxError, match='UNSAFE_TARGET'):
         validate_media_url(SOURCE)
-    for url in ['https://sf12-cdn-tos.douyinstatic.com/obj/music.mp3',
+    for url in ['https://sf12-cdn-tos-other.douyinstatic.com/obj/music.mp3',
                 'https://sf11-cdn-tos.douyinstatic.com.evil.test/obj/music.mp3',
                 'https://douyinstatic.com/obj/music.mp3']:
         with pytest.raises(LumaBoxError) as error:

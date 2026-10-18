@@ -8,10 +8,9 @@ PAGE_HOSTS = frozenset({"douyin.com", "www.douyin.com", "v.douyin.com", "iesdouy
 MEDIA_ROOTS = ("douyinvod.com", "douyinpic.com")
 # Exact hosts observed in the target detail response; one full MP4 was decoded.
 MEDIA_HOSTS = frozenset({"v5-hl-mly-ov.zjcdn.com", "v5-dy-ov-experiment.zjcdn.com"})
-# The unique confirmed gallery background player was downloaded and decoded.
-# Keep this policy separate from image/video hosts.
-AUDIO_HOSTS = frozenset({"lf26-music-east.douyinstatic.com", "lf9-music-east.douyinstatic.com",
-                         "sf11-cdn-tos.douyinstatic.com", "sf6-cdn-tos.douyinstatic.com"})
+# Confirmed gallery players use numbered nodes in these two music families.
+# Match the complete hostname; image/video and redirect policies stay separate.
+AUDIO_HOST_PATTERN = re.compile(r"(?:sf[0-9]+-cdn-tos|lf[0-9]+-music-east)\.douyinstatic\.com")
 # Observed 302 from the confirmed lf9 music URL; the final MP3 matched the
 # original byte-for-byte. This is a redirect destination, not a player source.
 AUDIO_REDIRECT_HOSTS = frozenset({"v9-default.tt.x.bsgslb.cn"})
@@ -58,7 +57,7 @@ def validate_audio_url(url: str, *, redirect: bool = False) -> str:
     if parts.fragment:
         raise LumaBoxError("UNSAFE_TARGET", "Audio URL has an unsupported fragment",
                           diagnostics={"policy_reason": "AUDIO_URL_INVALID", "host": parts.hostname})
-    if parts.hostname not in AUDIO_HOSTS and not (redirect is True and parts.hostname in AUDIO_REDIRECT_HOSTS):
+    if not AUDIO_HOST_PATTERN.fullmatch(parts.hostname) and not (redirect is True and parts.hostname in AUDIO_REDIRECT_HOSTS):
         raise LumaBoxError("UNSAFE_TARGET", "Audio host has not been verified",
                           diagnostics={"policy_reason": "AUDIO_HOST_UNSUPPORTED", "host": parts.hostname})
     return url
