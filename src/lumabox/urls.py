@@ -9,6 +9,7 @@ MEDIA_ROOTS = ("douyinvod.com", "douyinpic.com")
 # Exact hosts observed in the target detail response; one full MP4 was decoded.
 MEDIA_HOSTS = frozenset({"v5-hl-mly-ov.zjcdn.com", "v5-dy-ov-experiment.zjcdn.com"})
 WORK_PATH = re.compile(r"^/(video|note)/(\d{15,20})/?$")
+INPUT_URLS = re.compile(r"https?://[^\s<>\"'，。；！）】]+", re.IGNORECASE)
 
 
 def https_parts(url: str, code: str = "UNSAFE_TARGET"):
@@ -54,7 +55,7 @@ def page_identity(url: str) -> tuple[str, str] | None:
 
 
 def parse_input(text: str) -> InputLink:
-    matches = re.findall(r"https?://[^\s<>\"'，。；！）】]+", text, re.IGNORECASE)
+    matches = extract_input_urls(text)
     if len(matches) != 1:
         raise LumaBoxError("INVALID_INPUT", "Provide exactly one supported link")
     url = matches[0].rstrip(".,;!)]}")
@@ -67,3 +68,13 @@ def parse_input(text: str) -> InputLink:
     if parts.hostname == "v.douyin.com" and re.fullmatch(r"/[A-Za-z0-9_-]+/?", parts.path):
         return InputLink(url, None, None)
     raise LumaBoxError("INVALID_INPUT", "Provide a video, note or short link")
+
+
+def extract_input_urls(text: str) -> list[str]:
+    return [match.rstrip(".,;!)]}") for match in INPUT_URLS.findall(text)]
+
+
+def canonical_page_url(link: InputLink) -> str:
+    if link.work_id:
+        return f"https://www.douyin.com/{'video' if link.kind == 'video' else 'note'}/{link.work_id}"
+    return f"https://v.douyin.com{urlsplit(link.url).path}"
