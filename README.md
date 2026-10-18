@@ -2,7 +2,7 @@
 
 通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前开发版本为 **0.7.0**（批量提交与队列管理），云端运行版本为已验收的 **0.6.0**。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[0.6.0 上线记录](docs/validation/2026-10-17-production-0.6.0.md)、[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
+当前版本为 **0.7.0**（批量提交与队列管理），2026-10-18 已升级云端，见[0.7.0 上线记录](docs/validation/2026-10-18-production-0.7.0.md)。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[0.6.0 上线记录](docs/validation/2026-10-17-production-0.6.0.md)、[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
 
 0.7.0 的批量规则、真实视频 / 图集下载、旧数据升级和手机布局检查见[批量与队列验证](docs/validation/2026-10-17-batch-queue.md)。
 
