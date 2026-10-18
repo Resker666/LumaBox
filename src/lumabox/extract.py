@@ -1,9 +1,10 @@
+import math
 import re
 
 from .errors import LumaBoxError
 from .models import Work, MediaResource
 from .metadata import normalize_title
-from .urls import https_parts, validate_media_url
+from .urls import https_parts, validate_media_url, validate_audio_url
 
 # Based on observed Douyin detail DOM on 2026-10-12/13/16/17. No application state is read.
 DOM_SNAPSHOT = r"""({work_id, kind}) => {
@@ -42,7 +43,7 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
  const players = root ? Array.from(root.querySelectorAll('.basePlayerContainer')) : [];
  const player = players.length === 1 ? players[0] : null;
  const out = {work_id: candidate?.id || null, identity_source: candidate?.source || null,
-   kind, scope_confirmed: !!player, count: 0, resources: [], title: null, text: (document.body?.innerText || '').slice(0, 20000)};
+   kind, scope_confirmed: !!player, count: 0, resources: [], gallery_music: [], title: null, text: (document.body?.innerText || '').slice(0, 20000)};
  if (!player) return out;
  // Read caption nodes only inside the region whose identity was established.
  // A dedicated page's caption may be beside the player in the same main.
@@ -57,6 +58,13 @@ DOM_SNAPSHOT = r"""({work_id, kind}) => {
    const videos = Array.from(player.querySelectorAll('video'));
    if (videos.length === 1) {out.count = 1; out.resources = [{url: videos[0].currentSrc || videos[0].src, order: 1, role: 'video'}];}
  } else {
+   // Background music belongs to the uniquely confirmed player, outside every
+   // carousel slide. A Live Photo's slide video is never its music source.
+   const music = Array.from(player.querySelectorAll('video')).filter(v =>
+     v.closest('.basePlayerContainer') === player && !v.closest('.dySwiperSlide') &&
+     (!v.closest(feedSelector) || v.closest(feedSelector).getAttribute('data-e2e-vid') === work_id));
+   out.gallery_music = music.map(v => ({url: v.currentSrc || v.getAttribute('src') || v.querySelector('source')?.src || '',
+     duration: Number.isFinite(v.duration) ? v.duration : null}));
    const counters = Array.from(root.querySelectorAll('*')).map(e => (e.textContent || '').trim())
      .filter(t => /^\d+\s*\/\s*\d+$/.test(t)).map(t => t.split('/').map(Number).join('/'));
    const pairs = [...new Set(counters)];
@@ -120,6 +128,26 @@ def detect_access(text: str, has_media: bool) -> None:
         raise LumaBoxError("CHALLENGE_REQUIRED", "Complete the site's access requirements manually")
     if not has_media and re.search(r"请先登录后(?:观看|访问)|登录后才能(?:观看|访问)", text):
         raise LumaBoxError("AUTH_REQUIRED", "This work requires an account session")
+
+
+def extract_gallery_music(snapshot: dict, expected_id: str) -> tuple[str, float]:
+    if snapshot.get("work_id") != expected_id or not snapshot.get("scope_confirmed") or snapshot.get("kind") != "gallery":
+        raise LumaBoxError("AUDIO_FAILED", "The gallery background player could not be confirmed")
+    players = snapshot.get("gallery_music", [])
+    if not isinstance(players, list) or len(players) > 1:
+        raise LumaBoxError("AUDIO_FAILED", "The gallery background player is ambiguous")
+    if not players:
+        raise LumaBoxError("NO_AUDIO", "The gallery has no confirmed background music")
+    player = players[0]
+    url, duration = player.get("url"), player.get("duration")
+    if not isinstance(url, str) or not url.startswith("https://") or type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+        raise LumaBoxError("AUDIO_FAILED", "The gallery background music is not available")
+    try:
+        validate_audio_url(url)
+    except LumaBoxError as exc:
+        exc.diagnostics.setdefault("stage", "media_extraction")
+        raise
+    return url, float(duration)
 
 
 def _is_default_gallery_image(url: str) -> bool:

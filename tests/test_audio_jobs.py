@@ -133,14 +133,8 @@ def test_failed_audio_preserves_video_and_can_retry(web_config, media_fixtures, 
     assert store.get(job['id'])['audio']['status'] == 'success'
 
 
-def test_audio_rejects_gallery_and_source_tampering(web_config, tmp_path, media_fixtures):
+def test_audio_rejects_source_tampering(web_config, tmp_path, media_fixtures):
     store = JobStore(web_config)
-    gallery = store.create('https://v.douyin.com/gallery/', include_audio=True)
-    fixture_worker(web_config, store, tmp_path, media_fixtures[1], 'gallery').run_once()
-    assert store.get(gallery['id'])['audio']['status'] == 'unsupported'
-    with pytest.raises(WebError, match='AUDIO_UNAVAILABLE'):
-        store.audio.request(gallery['id'])
-    assert not store.audio.run_once(threading.Event())
     job, path, original = completed(store, media_fixtures[0])
     store.audio.request(job['id'])
     path.write_bytes(b'x' * len(original))

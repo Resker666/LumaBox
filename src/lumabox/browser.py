@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import async_playwright, Error as PlaywrightError
 
 from .errors import LumaBoxError, check_status
-from .extract import DOM_SNAPSHOT, detect_access, extract_work
+from .extract import DOM_SNAPSHOT, detect_access, extract_work, extract_gallery_music
 from .net import resolve_public
 from .metadata import normalize_title
 from .proxy import PublicProxy
@@ -265,7 +265,11 @@ class BrowserSession:
                         self.diagnostics["network_reason"] = failure["network_reason"]
                     raise LumaBoxError(failure["code"], "Browser network connection failed", diagnostics=dict(self.diagnostics))
 
-    async def load(self, link):
+    async def load_gallery_music(self, link):
+        """Confirm only the gallery's background player, without requiring images."""
+        return await self.load(link, gallery_music=True)
+
+    async def load(self, link, *, gallery_music=False):
         self.expected_identity = (link.work_id, link.kind) if link.work_id else None
         self.diagnostics = {"stage": "input_policy"}
         validate_page_url(link.url)
@@ -320,7 +324,18 @@ class BrowserSession:
                 # A scoped blob player is media that may still expose a normal
                 # HTTPS source; a comment or promotion login is not a view gate.
                 has_media = snapshot.get("scope_confirmed") and any(r.get("url") for r in snapshot["resources"])
+                if gallery_music:
+                    has_media = snapshot.get("scope_confirmed") and any(r.get("url") for r in snapshot.get("gallery_music", []))
                 detect_access(snapshot["text"], has_media)
+                if gallery_music:
+                    try:
+                        return extract_gallery_music(snapshot, work_id)
+                    except LumaBoxError as exc:
+                        if exc.code not in {"NO_AUDIO", "AUDIO_FAILED"}:
+                            raise
+                        last = exc
+                    await asyncio.sleep(0.25)
+                    continue
                 try:
                     work = extract_work(snapshot, work_id)
                     if not work.title and self.detail_work and self.detail_work.work_id == work_id:
