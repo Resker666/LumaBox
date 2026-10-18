@@ -10,7 +10,8 @@ MEDIA_ROOTS = ("douyinvod.com", "douyinpic.com")
 MEDIA_HOSTS = frozenset({"v5-hl-mly-ov.zjcdn.com", "v5-dy-ov-experiment.zjcdn.com"})
 # The unique confirmed gallery background player was downloaded and decoded.
 # Keep this policy separate from image/video hosts.
-AUDIO_HOSTS = frozenset({"lf26-music-east.douyinstatic.com", "lf9-music-east.douyinstatic.com"})
+AUDIO_HOSTS = frozenset({"lf26-music-east.douyinstatic.com", "lf9-music-east.douyinstatic.com",
+                         "sf11-cdn-tos.douyinstatic.com", "sf6-cdn-tos.douyinstatic.com"})
 # Observed 302 from the confirmed lf9 music URL; the final MP3 matched the
 # original byte-for-byte. This is a redirect destination, not a player source.
 AUDIO_REDIRECT_HOSTS = frozenset({"v9-default.tt.x.bsgslb.cn"})
