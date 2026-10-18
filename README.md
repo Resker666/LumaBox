@@ -2,7 +2,7 @@
 
 通过普通未登录 Chromium 保存一条抖音作品的视频或完整图片集合，并完整解码验证文件。提供独立 Python 命令行内核和个人使用的本地网页。
 
-当前开发版本为 **0.8.0**（图集原始 MP3 配乐），先在本地验证；云端仍为 **0.7.0**，见[0.7.0 上线记录](docs/validation/2026-10-18-production-0.7.0.md)。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[0.6.0 上线记录](docs/validation/2026-10-17-production-0.6.0.md)、[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
+当前开发与云端版本为 **0.8.0**（图集原始 MP3 配乐），真实图集 / MP3 下载与旧数据保留见[0.8.0 上线记录](docs/validation/2026-10-18-production-0.8.0.md)。已发布基线为 [v0.3.0](https://github.com/Resker666/LumaBox/tree/v0.3.0)。[0.7.0 上线记录](docs/validation/2026-10-18-production-0.7.0.md)、[0.6.0 上线记录](docs/validation/2026-10-17-production-0.6.0.md)、[手机与音频验证](docs/validation/2026-10-17-mobile-audio.md)、[单图修复验证](docs/validation/2026-10-17-single-static-note.md)、[重试与文件管理验证](docs/validation/2026-10-17-retry-storage.md)、[云部署说明](docs/deployment.md)、[版本变更](CHANGELOG.md)列出范围与验证条件。后续事项见[待办](TODO.md)。
 
 0.7.0 的批量规则、真实视频 / 图集下载、旧数据升级和手机布局检查见[批量与队列验证](docs/validation/2026-10-17-batch-queue.md)。
 
@@ -22,6 +22,7 @@
 | 最新无头视频测试 | DNS 返回非公网地址，页面请求前停止；未验证到无头提取/下载阶段 |
 | Ubuntu 24.04 云服务器，有界面 Chromium + Xvfb | 命令行视频成功：1920×1080、124.6 秒；图集首次失败，重试 12/12 张成功，均完整解码通过 |
 | 云端 systemd 网页后台 | 真实视频、12 张图集及 ZIP、范围预览、取消后队列继续、重启保留历史及文件哈希通过；临时 IP 认证入口已实测，域名 HTTPS 待备案审核通过后启用 |
+| 云端生产 0.8.0，图集原始 MP3 | 新下载 12 张图集和 28.16 秒原始 MP3 成功；原字节、完整解码、Range 及 Chromium 手机尺寸试听通过，旧 23 条历史及文件保留；Windows WebKit 下载通过、试听未通过，iPhone 实机待用户确认，见[上线记录](docs/validation/2026-10-18-production-0.8.0.md) |
 | 云端生产 0.5.1，公网手机尺寸 WebKit | 单张静态图文、ZIP 下载及解码、图片预览、旧视频 Range、重复收藏、隐藏记录恢复、取消及队列继续通过；仅删除新验收副本，原有 8 条历史及 18 个文件保留，见[上线记录](docs/validation/2026-10-17-production-0.5.1.md) |
 
 Windows 10054 连接关闭回调仍有输出；上述有界面视频运行已成功发布文件，这个回调问题尚未修复。当前只确认以上实测样本，不保证所有作品或网络都成功。
