@@ -19,7 +19,7 @@ from .batch import BatchJobs, MAX_BATCH_ITEMS
 
 MESSAGES = {
     "BATCH_LIMIT": "一次最多处理 10 条链接或任务，请分批提交。",
-    "AUDIO_UNAVAILABLE": "请先完成视频下载，再提取音频；本版暂不支持图集配乐。",
+    "AUDIO_UNAVAILABLE": "请先完成作品下载，再保存音频；已保存的作品文件需要保持可用。",
     "FILE_IN_USE": "文件正在下载或预览，请停止预览或等待传输完成后再删除。",
     "UNSAFE_DELETE": "目录包含无法确认归属的内容或链接，未执行删除，请检查保存位置。",
     "OUTPUT_CHANGED": "此删除任务属于旧保存目录，请切回原目录后处理。",

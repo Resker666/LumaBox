@@ -141,7 +141,7 @@ class StorageManager:
                 if (relative.is_absolute() or len(relative.parts) != 3 or relative.parts[0] != job_id or
                         not re.fullmatch(fr"{re.escape(row['work_id'] or '')}-[0-9a-f]{{32}}", relative.parts[1]) or
                         relative.name != file["name"] or not re.fullmatch(
-                            r"(?:[0-9]{15,20}(?:-images|-audio-[0-9a-f]{32})?|[0-9]{2}(?:-motion)?)\.(?:mp4|zip|jpg|webp|m4a)", relative.name)):
+                            r"(?:[0-9]{15,20}(?:-images|-audio-[0-9a-f]{32})?|[0-9]{2}(?:-motion)?)\.(?:mp4|zip|jpg|webp|m4a|mp3)", relative.name)):
                     raise WebError("UNSAFE_DELETE", 409)
                 self._checked(str(relative))
                 allowed.update({str(relative), str(relative.parent / "report.json")})

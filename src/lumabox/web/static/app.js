@@ -32,6 +32,19 @@ const networkFailures = {
   TLS_ERROR: "TLS 安全连接失败，请检查系统时间、证书或代理设置后重试。",
   CONNECTION_FAILED: "网络连接失败，请检查网络或代理设置后重试。"
 };
+function audioDiagnosticText(detail) {
+  if (!detail) return null;
+  if (networkFailures[detail.network_reason]) return networkFailures[detail.network_reason];
+  if (detail.policy_reason === "AUDIO_HOST_UNSUPPORTED") {
+    const host = typeof detail.host === "string" && /^[a-z0-9.-]{1,253}$/i.test(detail.host) ? detail.host : null;
+    return host ? `暂不支持此配乐域名：${host}。` : "暂不支持此配乐域名，请稍后重试。";
+  }
+  const policies = {
+    AUDIO_URL_INVALID: "配乐地址格式无效，无法保存，请稍后重试。",
+    AUDIO_REDIRECT_LIMIT: "配乐地址跳转次数过多，请稍后重试。"
+  };
+  return policies[detail.policy_reason] || null;
+}
 const mediaFailures = {
   TARGET_UNCONFIRMED: "页面已打开，但尚未确认目标作品区域，暂未保存文件。",
   WORK_CHANGED: "页面切换到了其他作品，下载已停止，请重新提交原链接。",
@@ -43,6 +56,7 @@ const mediaFailures = {
 };
 const history = { q: "", status: "all", page: 1, page_size: 20, scope: "history" };
 const activeAudio = new Set(["waiting", "pending", "running", "cancelling"]);
+const isAudioFile = (file) => ["audio/mp4", "audio/mpeg"].includes(file.mime);
 const audioMessages = {
   waiting: "视频完成后将自动提取音频。", pending: "音频已排队，稍后开始。",
   running: "正在提取音频…", cancelling: "正在取消音频…", cancelled: "音频已取消，视频已保留。",
@@ -309,12 +323,12 @@ function offerDuplicate(error, request) {
   $("duplicate-message").textContent = error.message;
   const controls = $("duplicate-actions");
   controls.replaceChildren(action(existing.hidden ? "恢复并查看" : "查看已有任务", "preview-button", () => showExisting(existing.id, existing.hidden)));
-  if (request.include_audio && existing.kind === "video" && existing.match_type === "saved") controls.append(action("补充提取音频", "preview-button", async () => {
+  if (request.include_audio && ["video", "gallery"].includes(existing.kind) && existing.match_type === "saved") controls.append(action(existing.kind === "gallery" ? "补保存配乐" : "补充提取音频", "preview-button", async () => {
     if (existing.hidden) await api(`/api/jobs/${encodeURIComponent(existing.id)}/restore`, {});
     await api(`/api/jobs/${encodeURIComponent(existing.id)}/audio`, {});
     $("duplicate-notice").hidden = true;
     await addJob();
-    notice("submit-success", "已为已有视频安排音频提取。");
+    notice("submit-success", "已为已有作品安排音频保存。");
   }));
   if (existing.match_type === "saved") controls.append(action("重新下载", "retry-button", async () => {
     if (!window.confirm("重新下载会保留已有文件，并额外占用空间。继续吗？")) return;
@@ -381,7 +395,7 @@ function buildCard(job, selectionScope = null) {
   if (job.status === "expired") detail = "旧版临时文件已过期，可以重新保存此作品。";
   if (job.status === "failed") detail = failureText(job);
   if (job.status === "success") {
-    const media = job.files.filter((file) => file.mime !== "application/zip" && file.mime !== "audio/mp4");
+    const media = job.files.filter((file) => file.mime !== "application/zip" && !isAudioFile(file));
     const motions = gallery ? media.filter((file) => file.mime === "video/mp4").length : 0;
     const description = gallery ? `${job.actual_count} 张图片${motions ? ` · ${motions} 段动态片段` : ""}` : "完整视频";
     detail = `${description} · ${remoteMode ? "已保存到服务器" : "已保存到本机"}`;
@@ -410,7 +424,28 @@ function buildCard(job, selectionScope = null) {
   const controls = element("div", "job-controls");
   const audio = job.audio || { status: "none" };
   const audioActive = activeAudio.has(audio.status);
-  const audioText = audio.status === "failed" ? audioFailures[audio.error] || audioFailures.AUDIO_FAILED : audioMessages[audio.status];
+  const galleryAudioMessages = {
+    waiting: "图片完成后将自动保存背景音乐。", pending: "背景音乐已排队，稍后开始。",
+    running: "正在保存背景音乐…", cancelling: "正在取消背景音乐…",
+    unsupported: "图片已保存，可单独保存配乐。",
+    cancelled: "背景音乐已取消，图片已保留。", success: "配乐已保存 · MP3"
+  };
+  const galleryAudioFailures = {
+    NO_AUDIO: "此图集没有可用的背景音乐。", SIZE_LIMIT: "背景音乐超过 200 MiB 上限。",
+    AUTH_REQUIRED: "背景音乐需要登录后重试。", CHALLENGE_REQUIRED: "背景音乐需要完成验证后重试。",
+    BLOCKED: "背景音乐暂时无法访问。", RATE_LIMITED: "背景音乐请求过于频繁，请稍后重试。",
+    NOT_FOUND: "背景音乐已不可用。", UNSUPPORTED_MEDIA: "背景音乐格式暂不支持。",
+    DOWNLOAD_FAILED: "背景音乐下载失败，请稍后重试。",
+    UNSAFE_TARGET: "配乐地址校验未通过，请检查网络后重试。"
+  };
+  const diagnosticText = audio.status === "failed" ? audioDiagnosticText(audio.detail) : null;
+  let audioText = audio.status === "failed" ? diagnosticText || audioFailures[audio.error] || audioFailures.AUDIO_FAILED : audioMessages[audio.status];
+  if (!job.kind && audio.status === "waiting") audioText = "作品完成后将自动保存音频。";
+  if (gallery) {
+    audioText = audio.status === "failed"
+      ? `${diagnosticText || galleryAudioFailures[audio.error] || (audioFailures[audio.error] || audioFailures.AUDIO_FAILED).replaceAll("视频已保留。", "")} 图片已保留。`
+      : galleryAudioMessages[audio.status] || audioText;
+  }
   if (audioText) body.append(element("p", `audio-status ${audio.status}`, audioText));
   if (["pending", "running"].includes(audio.status)) controls.append(action("取消音频", "cancel-button", async () => {
     await api(`/api/jobs/${encodeURIComponent(job.id)}/audio/cancel`, {});
@@ -438,7 +473,7 @@ function buildCard(job, selectionScope = null) {
       await api(`/api/jobs/${encodeURIComponent(job.id)}/open-folder`, {});
       notice("submit-success", "已打开保存文件夹。");
     }, "folder"));
-    const audioFile = job.files.find((file) => file.mime === "audio/mp4");
+    const audioFile = job.files.find((file) => isAudioFile(file));
     if (audioFile) {
       moreControls.append(action("试听音频", "preview-button", () => openPreview(job, "audio"), "audio-preview"));
       const link = element("a", "download-link", "下载音频");
@@ -446,7 +481,7 @@ function buildCard(job, selectionScope = null) {
       link.download = audioFile.name;
       link.dataset.focusKey = "download-audio";
       moreControls.append(link);
-    } else if (!gallery && !audioActive) moreControls.append(action(audio.status === "failed" ? "重新提取音频" : "提取音频", "preview-button", async () => {
+    } else if (!audioActive) moreControls.append(action(gallery ? (audio.status === "failed" ? "重试配乐" : "保存配乐") : (audio.status === "failed" ? "重新提取音频" : "提取音频"), "preview-button", async () => {
       await api(`/api/jobs/${encodeURIComponent(job.id)}/audio`, {});
       await refreshJobs();
     }, "extract-audio"));
@@ -456,7 +491,7 @@ function buildCard(job, selectionScope = null) {
     extra.append(summary);
     const links = element("div", "file-links");
     const ordered = [...job.files].sort((a, b) => (b.mime === "application/zip") - (a.mime === "application/zip"));
-    for (const file of ordered.filter((file) => file.mime !== "audio/mp4")) {
+    for (const file of ordered.filter((file) => !isAudioFile(file))) {
       const name = file.mime === "application/zip" ? "另存整组 ZIP" : gallery ? (file.mime === "video/mp4" ? `另存动态片段 ${file.name.split("-")[0]}` : `另存图片 ${file.name.split(".")[0]}`) : "另存视频";
       const link = element("a", "download-link", name);
       link.href = `/api/files/${encodeURIComponent(file.id)}`;
@@ -596,7 +631,7 @@ async function showPreviewFile() {
   const version = ++previewVersion, file = preview.files[preview.index];
   const path = `/api/files/${encodeURIComponent(file.id)}/preview`;
   const gallery = preview.kind === "gallery";
-  const audio = file.mime === "audio/mp4";
+  const audio = isAudioFile(file);
   const image = file.mime.startsWith("image/");
   clearPreviewMedia();
   $("preview-video").hidden = true;
@@ -625,7 +660,7 @@ async function showPreviewFile() {
 
 async function openPreview(job, mode = "media") {
   releasePreview();
-  preview = { kind: mode === "audio" ? "audio" : job.kind, index: 0, files: job.files.filter((file) => mode === "audio" ? file.mime === "audio/mp4" : ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime)) };
+  preview = { kind: mode === "audio" ? "audio" : job.kind, index: 0, files: job.files.filter((file) => mode === "audio" ? isAudioFile(file) : ["video/mp4", "image/jpeg", "image/webp"].includes(file.mime)) };
   if (!preview.files.length) return;
   $("preview-title").textContent = title(job);
   $("preview-identity").textContent = job.work_id ? `作品 ID ${job.work_id}` : "";

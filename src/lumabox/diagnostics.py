@@ -6,6 +6,7 @@ import ssl
 NETWORK_REASONS = frozenset({"DNS_NON_PUBLIC", "DNS_LOOKUP_FAILED", "DNS_TIMEOUT",
     "CONNECTION_REFUSED", "CONNECTION_RESET", "CONNECTION_TIMEOUT", "CONNECTION_UNREACHABLE",
     "TLS_ERROR", "CONNECTION_FAILED"})
+POLICY_REASONS = frozenset({"AUDIO_HOST_UNSUPPORTED", "AUDIO_URL_INVALID", "AUDIO_REDIRECT_LIMIT"})
 STAGES = frozenset({"dns_resolution", "page_navigation", "browser_start", "browser_load",
     "media_extraction", "media_transfer", "media_verification", "publication", "input_policy", "target_identity"})
 MEDIA_REASONS = {
@@ -46,6 +47,10 @@ def public_diagnostics(diagnostics):
                   "Public DNS resolution failed": "DNS_LOOKUP_FAILED"}.get(diagnostics.get("reason") if isinstance(diagnostics.get("reason"), str) else None)
     if reason:
         detail["network_reason"] = reason
+    policy = diagnostics.get("policy_reason")
+    if isinstance(policy, str) and policy in POLICY_REASONS:
+        detail["policy_reason"] = policy
+    if reason or "policy_reason" in detail:
         stage, host = diagnostics.get("stage"), diagnostics.get("host")
         if isinstance(stage, str) and stage in STAGES:
             detail["stage"] = stage

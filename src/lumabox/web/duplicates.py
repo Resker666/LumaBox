@@ -12,7 +12,7 @@ class DuplicateWorkError(WebError):
 
 
 def available(store, db, job_id):
-    files = db.execute("SELECT * FROM files WHERE job_id=? AND mime<>'audio/mp4'", (job_id,)).fetchall()
+    files = db.execute("SELECT * FROM files WHERE job_id=? AND mime NOT IN ('audio/mp4','audio/mpeg')", (job_id,)).fetchall()
     if not files:
         return False
     try:

@@ -135,8 +135,8 @@ class WindowsJob:
 
 
 class ProcessTree:
-    def __init__(self, command, stdout):
-        self.command, self.stdout = command, stdout
+    def __init__(self, command, stdout, *, stderr=subprocess.DEVNULL):
+        self.command, self.stdout, self.stderr = command, stdout, stderr
         self.process, self.job = None, None
         self.stopped = False
 
@@ -148,7 +148,7 @@ class ProcessTree:
             else:
                 options = {"start_new_session": True}
             self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL, stdout=self.stdout,
-                                            stderr=subprocess.DEVNULL, shell=False, **options)
+                                            stderr=self.stderr, shell=False, **options)
             if self.job:
                 self.job.attach_and_resume(self.process)
             return self

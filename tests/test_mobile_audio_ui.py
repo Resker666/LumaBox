@@ -275,9 +275,26 @@ def test_new_video_audio_option_saves_video_and_m4a(daily_server, browser):
         page.close()
 
 
-def test_audio_option_keeps_gallery_images_without_audio_actions(daily_server, browser, media_fixtures):
-    # Catches offering extraction of gallery background music in this release,
-    # or treating the unsupported audio option as a failed image download.
+@pytest.mark.parametrize("failure", [None, "NO_AUDIO", "AUTH_REQUIRED", "UNSAFE_TARGET"])
+def test_gallery_audio_preserves_images_and_offers_music_actions(daily_server, browser, media_fixtures, monkeypatch, tmp_path, failure):
+    import hashlib
+    import subprocess
+    import lumabox.web.audio as audio
+    from lumabox.errors import LumaBoxError
+    music = tmp_path / "fixture.mp3"
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=0.5", "-c:a", "libmp3lame", str(music)], check=True)
+    payload = music.read_bytes()
+    def download(work_id, target, *, headless, cancelled, max_bytes, on_created):
+        if failure:
+            raise LumaBoxError(failure)
+        with target.open("xb") as stream:
+            stat = target.stat()
+            on_created(target, (stat.st_dev, stat.st_ino))
+            stream.write(payload)
+        return {"name": target.name, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+                "mime": "audio/mpeg", "duration": .55}
+    monkeypatch.setattr(audio, "download_gallery_music", download)
     url, worker = daily_server
     worker.mode, worker.fixture = "gallery", media_fixtures[1]
     page = browser.new_page(viewport={"width": 390, "height": 844})
@@ -287,12 +304,20 @@ def test_audio_option_keeps_gallery_images_without_audio_actions(daily_server, b
         page.get_by_label("同时保存音频").check()
         submit(page, "https://www.douyin.com/note/7686430330920075249")
         expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_be_visible(timeout=12000)
-        expect(page.get_by_text("图集暂不提取音频，图片已保留。", exact=True)).to_be_visible()
+        message = {None: "配乐已保存 · MP3", "NO_AUDIO": "此图集没有可用的背景音乐。 图片已保留。",
+                   "AUTH_REQUIRED": "背景音乐需要登录后重试。 图片已保留。",
+                   "UNSAFE_TARGET": "配乐地址校验未通过，请检查网络后重试。 图片已保留。"}[failure]
+        expect(page.get_by_text(message, exact=True)).to_be_visible(timeout=12000)
         page.get_by_text("更多", exact=True).click()
-        expect(page.get_by_role("button", name="提取音频", exact=True)).to_have_count(0)
-        expect(page.get_by_role("button", name="试听音频", exact=True)).to_have_count(0)
         expect(page.get_by_role("link", name="下载整组 ZIP", exact=True)).to_be_visible()
-        assert worker.store.search()["jobs"][0]["audio"]["status"] == "unsupported"
+        if failure:
+            expect(page.get_by_role("button", name="重试配乐", exact=True)).to_be_visible()
+        else:
+            expect(page.get_by_role("link", name="下载音频", exact=True)).to_have_attribute("download", __import__("re").compile(r".*\.mp3"))
+            page.get_by_role("button", name="试听音频", exact=True).click()
+            expect(page.locator("#preview-audio")).to_be_visible()
+            assert page.locator("#preview-audio").evaluate("el => el.tagName") == "AUDIO"
+        assert worker.store.search()["jobs"][0]["status"] == "success"
     finally:
         page.close()
 
@@ -387,5 +412,68 @@ def test_existing_dialog_retains_details_focus_when_audio_state_refreshes(daily_
         state.update(status="failed", error="RESULT_UNAVAILABLE")
         expect(dialog.get_by_text("原音频文件已移动或损坏，可重新提取。", exact=True)).to_be_visible(timeout=6000)
         expect(details).to_be_focused()
+    finally:
+        page.close()
+
+
+def test_legacy_gallery_audio_offers_manual_music_save(daily_server, browser, media_fixtures):
+    url, worker = daily_server
+    worker.mode, worker.fixture = "gallery", media_fixtures[1]
+    job = worker.store.create("https://www.douyin.com/note/7686430330920075249")
+    wait_finished(worker.store, job["id"])
+    page = browser.new_page()
+    def legacy(route):
+        response = route.fetch()
+        payload = response.json()
+        if isinstance(payload, dict) and "jobs" in payload:
+            for item in payload["jobs"]:
+                item["audio"] = {"status": "unsupported", "error": None}
+        route.fulfill(response=response, json=payload)
+    page.route("**/api/jobs?**", legacy)
+    try:
+        page.goto(url)
+        expect(page.get_by_text("图片已保存，可单独保存配乐。", exact=True)).to_be_visible()
+        page.get_by_text("更多", exact=True).click()
+        expect(page.get_by_role("button", name="保存配乐", exact=True)).to_be_visible()
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("error,detail,message", [
+    ("UNSAFE_TARGET", {"policy_reason": "AUDIO_HOST_UNSUPPORTED", "host": "music.example.com", "stage": "media_transfer"},
+     "暂不支持此配乐域名：music.example.com。 图片已保留。"),
+    ("UNSAFE_TARGET", {"network_reason": "DNS_NON_PUBLIC", "host": "lf9.douyinstatic.com"},
+     "DNS 返回虚拟或非公网地址，当前地址检查已停止连接。请检查 DNS 或代理设置后重试。 图片已保留。"),
+    ("DOWNLOAD_FAILED", {"network_reason": "DNS_LOOKUP_FAILED", "host": "lf26.douyinstatic.com"},
+     "DNS 解析失败，无法取得网站地址。请检查网络和 DNS 设置后重试。 图片已保留。"),
+    ("DOWNLOAD_FAILED", {"network_reason": "CONNECTION_RESET"},
+     "连接被重置，下载连接已中断，请稍后重试。 图片已保留。"),
+    ("UNSAFE_TARGET", {"policy_reason": "AUDIO_URL_INVALID"},
+     "配乐地址格式无效，无法保存，请稍后重试。 图片已保留。"),
+    ("UNSAFE_TARGET", {"policy_reason": "AUDIO_REDIRECT_LIMIT"},
+     "配乐地址跳转次数过多，请稍后重试。 图片已保留。"),
+])
+def test_gallery_music_diagnostics_distinguish_policy_and_network(daily_server, browser, media_fixtures, error, detail, message):
+    url, worker = daily_server
+    worker.mode, worker.fixture = "gallery", media_fixtures[1]
+    job = worker.store.create("https://www.douyin.com/note/7686430330920075249")
+    wait_finished(worker.store, job["id"])
+    page = browser.new_page(viewport={"width": 390, "height": 844})
+    def diagnostic(route):
+        response = route.fetch()
+        payload = response.json()
+        if isinstance(payload, dict) and "jobs" in payload:
+            for item in payload["jobs"]:
+                item["audio"] = {"status": "failed", "error": error, "detail": detail}
+        route.fulfill(response=response, json=payload)
+    page.route("**/api/jobs?**", diagnostic)
+    try:
+        page.goto(url)
+        expect(page.get_by_text(message, exact=True)).to_be_visible()
+        expect(page.locator("#job-list").get_by_text("已完成", exact=True)).to_be_visible()
+        page.get_by_text("更多", exact=True).click()
+        expect(page.get_by_role("button", name="重试配乐", exact=True)).to_be_visible()
+        expect(page.get_by_role("link", name="下载整组 ZIP", exact=True)).to_be_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     finally:
         page.close()

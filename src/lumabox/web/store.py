@@ -68,7 +68,8 @@ class JobStore:
                                      ("include_audio", "INTEGER NOT NULL DEFAULT 0"),
                                      ("supplement_duplicate_audio", "INTEGER NOT NULL DEFAULT 1"),
                                      ("audio_state", "TEXT NOT NULL DEFAULT 'none'"),
-                                     ("audio_error", "TEXT"), ("audio_token", "TEXT"), ("audio_root", "TEXT"),
+                                     ("audio_error", "TEXT"), ("audio_error_detail", "TEXT NOT NULL DEFAULT '{}'"),
+                                     ("audio_token", "TEXT"), ("audio_root", "TEXT"),
                                      ("audio_manifest", "TEXT NOT NULL DEFAULT '[]'")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
@@ -152,13 +153,13 @@ class JobStore:
             db.execute("UPDATE jobs SET status='duplicate',duplicate_of=?,work_id=?,kind=?,title=?,error=NULL,error_detail='{}',audio_state='none',updated_at=? WHERE id=?",
                        (target_id, target["work_id"], target["kind"], target["title"], time.time(), job_id))
             supplement = (bool(row["include_audio"]) and bool(row["supplement_duplicate_audio"])
-                          and target["kind"] == "video" and target["status"] == "success" and target["hidden_at"] is None)
+                          and target["kind"] in ("video", "gallery") and target["status"] == "success" and target["hidden_at"] is None)
         if supplement:
             try:
                 self.audio.request(target_id)
             except WebError:
                 with self.connection() as db:
-                    db.execute("UPDATE jobs SET audio_state='failed',audio_error='AUDIO_FAILED' WHERE id=?", (job_id,))
+                    db.execute("UPDATE jobs SET audio_state='failed',audio_error='AUDIO_FAILED',audio_error_detail='{}' WHERE id=?", (job_id,))
         return True
 
     def restore(self, job_id):
@@ -241,6 +242,10 @@ class JobStore:
                           retry_at=row["retry_at"], attempts=json.loads(row["attempts"] or "[]"))
             result.update(duplicate_of=row["duplicate_of"], storage_state=row["storage_state"])
             result.update(include_audio=bool(row["include_audio"]), audio={"status": row["audio_state"], "error": row["audio_error"]})
+            if row["audio_state"] == "failed":
+                audio_detail = public_diagnostics(json.loads(row["audio_error_detail"] or "{}"))
+                if audio_detail:
+                    result["audio"]["detail"] = audio_detail
             if row["status"] == "duplicate":
                 target = db.execute("SELECT * FROM jobs WHERE id=?", (row["duplicate_of"],)).fetchone()
                 result["duplicate_target"] = (
@@ -252,13 +257,13 @@ class JobStore:
                 result["progress"]["elapsed_seconds"] = max(0, int(end - row["started_at"]))
             if row["status"] == "success" and row["storage_state"] == "present":
                 for file in db.execute("SELECT * FROM files WHERE job_id=? ORDER BY rowid", (job_id,)):
-                    if file["mime"] == "audio/mp4":
+                    if file["mime"] in ("audio/mp4", "audio/mpeg"):
                         try:
                             self.file_path(file)
                         except (WebError, OSError):
                             continue  # Keep its ownership index for explicit deletion.
                     result["files"].append(self.public_file(file))
-                if row["audio_state"] == "success" and not any(f["mime"] == "audio/mp4" for f in result["files"]):
+                if row["audio_state"] == "success" and not any(f["mime"] in ("audio/mp4", "audio/mpeg") for f in result["files"]):
                     result["audio"] = {"status": "failed", "error": "RESULT_UNAVAILABLE"}
                 first = db.execute("SELECT relative_path FROM files WHERE job_id=? ORDER BY rowid LIMIT 1", (job_id,)).fetchone()
                 if first:
@@ -385,8 +390,8 @@ class JobStore:
             db.execute("UPDATE jobs SET status='success',work_id=?,kind=?,title=COALESCE(?,title),expected_count=?,actual_count=?,updated_at=? WHERE id=?",
                        (result["work_id"], result["kind"], normalize_title(result.get("title")), result["expected_count"], result["actual_count"], time.time(), job_id))
             if row["include_audio"]:
-                db.execute("UPDATE jobs SET audio_state=?,audio_error=NULL WHERE id=?",
-                           ("pending" if result["kind"] == "video" else "unsupported", job_id))
+                db.execute("UPDATE jobs SET audio_state=?,audio_error=NULL,audio_error_detail='{}' WHERE id=?",
+                           ("pending", job_id))
         self.storage.invalidate()
 
     def fail(self, job_id: str, error: str, result: dict | None = None):

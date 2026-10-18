@@ -9,13 +9,17 @@ import uuid
 from pathlib import Path
 
 from ..audio import extract_audio, audio_staging_path
+from ..gallery_music import download_gallery_music
 from ..errors import LumaBoxError
+from ..diagnostics import public_diagnostics
 from .config import WebError
 
 ACTIVE_AUDIO = frozenset({'pending', 'running', 'cancelling'})
 AUDIO_LIMIT = 200 * 1024**2
 AUDIO_ERRORS = frozenset({'NO_AUDIO', 'AUDIO_FAILED', 'INTERRUPTED', 'SIZE_LIMIT',
-                          'DEPENDENCY_MISSING', 'TIMEOUT', 'VERIFY_FAILED', 'STORAGE_FULL'})
+                          'DEPENDENCY_MISSING', 'TIMEOUT', 'VERIFY_FAILED', 'STORAGE_FULL',
+                          'UNSAFE_TARGET', 'AUTH_REQUIRED', 'CHALLENGE_REQUIRED', 'BLOCKED',
+                          'RATE_LIMITED', 'NOT_FOUND', 'DOWNLOAD_FAILED', 'UNSUPPORTED_MEDIA'})
 
 
 class AudioJobs:
@@ -25,12 +29,12 @@ class AudioJobs:
     def request(self, job_id):
         with self.store.lock:
             job = self.store.get(job_id)
-            if job['status'] != 'success' or job['kind'] != 'video' or job['storage_state'] != 'present':
+            if job['status'] != 'success' or job['kind'] not in ('video', 'gallery') or job['storage_state'] != 'present':
                 raise WebError('AUDIO_UNAVAILABLE', 409)
             if job['audio']['status'] in ACTIVE_AUDIO:
                 return job
             with self.store.connection() as db:
-                for file in db.execute("SELECT * FROM files WHERE job_id=? AND mime='audio/mp4'", (job_id,)):
+                for file in db.execute("SELECT * FROM files WHERE job_id=? AND mime IN ('audio/mp4','audio/mpeg')", (job_id,)):
                     try:
                         self.store.file_path(dict(file))
                         return job
@@ -44,7 +48,7 @@ class AudioJobs:
                 self.store.file_path(self._source(row))
                 # Retain invalid/missing attachment indexes so explicit purge still
                 # knows their ownership. Public views omit unusable optional files.
-                db.execute("UPDATE jobs SET include_audio=1,audio_state='pending',audio_error=NULL,audio_token=NULL,audio_root=NULL,audio_manifest='[]' WHERE id=?", (job_id,))
+                db.execute("UPDATE jobs SET include_audio=1,audio_state='pending',audio_error=NULL,audio_error_detail='{}',audio_token=NULL,audio_root=NULL,audio_manifest='[]' WHERE id=?", (job_id,))
             self.store.storage.invalidate()
             return self.store.get(job_id)
 
@@ -60,14 +64,18 @@ class AudioJobs:
 
     def _source(self, row):
         with self.store.connection() as db:
-            file = db.execute("SELECT * FROM files WHERE job_id=? AND mime='video/mp4'", (row['id'],)).fetchone()
+            if row['kind'] == 'gallery':
+                file = db.execute("SELECT * FROM files WHERE job_id=? AND mime IN ('image/jpeg','image/webp') ORDER BY rowid LIMIT 1", (row['id'],)).fetchone()
+            else:
+                file = db.execute("SELECT * FROM files WHERE job_id=? AND mime='video/mp4'", (row['id'],)).fetchone()
         if not file:
             raise WebError('AUDIO_UNAVAILABLE', 409)
         file = dict(file)
         relative = Path(file['relative_path'])
         if (len(relative.parts) != 3 or relative.parts[0] != row['id'] or
                 not re.fullmatch(fr"{re.escape(row['work_id'])}-[0-9a-f]{{32}}", relative.parts[1]) or
-                relative.name != f"{row['work_id']}.mp4"):
+                (not re.fullmatch(r'[0-9]{2}\.(?:jpg|webp)', relative.name) if row['kind'] == 'gallery'
+                 else relative.name != f"{row['work_id']}.mp4")):
             raise WebError('VERIFY_FAILED')
         return file
 
@@ -79,8 +87,9 @@ class AudioJobs:
         root = self.store.config.output_dir if root is None else root
         parent = Path(source['relative_path']).parent
         directory = self.store.safe_path(str(parent), root=root)
-        temporary = directory / f'.audio-{token}.m4a'
-        final = directory / f"{row['work_id']}-audio-{token}.m4a"
+        extension = 'mp3' if row['kind'] == 'gallery' else 'm4a'
+        temporary = directory / f'.audio-{token}.{extension}'
+        final = directory / f"{row['work_id']}-audio-{token}.{extension}"
         for path in (temporary, final, audio_staging_path(temporary)):
             if os.path.lexists(path):
                 self.store.safe_path(str(path.relative_to(root)), root=root)
@@ -128,7 +137,7 @@ class AudioJobs:
                 clean = self._clean(row, root)
                 status = 'cancelled' if row['audio_state'] in ('cancelling', 'cancelled') else 'failed'
                 with self.store.connection() as db:
-                    db.execute("UPDATE jobs SET audio_state=?,audio_error=? WHERE id=?",
+                    db.execute("UPDATE jobs SET audio_state=?,audio_error=?,audio_error_detail='{}' WHERE id=?",
                                (status, (None if status == 'cancelled' else 'INTERRUPTED') if clean else 'CLEANUP_FAILED', row['id']))
                     if clean:
                         db.execute("UPDATE jobs SET audio_token=NULL,audio_root=NULL,audio_manifest='[]' WHERE id=?", (row['id'],))
@@ -176,12 +185,13 @@ class AudioJobs:
             if not row:
                 return False
             token = uuid.uuid4().hex
-            db.execute("UPDATE jobs SET audio_state='running',audio_token=?,audio_root=?,audio_manifest='[]' WHERE id=?",
+            db.execute("UPDATE jobs SET audio_state='running',audio_token=?,audio_root=?,audio_manifest='[]',audio_error_detail='{}' WHERE id=?",
                        (token, str(self.store.config.output_dir), row['id']))
             row = dict(db.execute('SELECT * FROM jobs WHERE id=?', (row['id'],)).fetchone())
         self.store.storage.invalidate()
         published = False
         error = 'AUDIO_FAILED'
+        detail = {}
 
         def cancelled():
             if stopping.is_set():
@@ -207,7 +217,13 @@ class AudioJobs:
                 if digest.hexdigest() != source['sha256']:
                     raise WebError('VERIFY_FAILED')
                 record = lambda path, identity: self._record_created(row, path, identity)
-                data = extract_audio(self.store.file_path(source), temporary, cancelled=cancelled, max_bytes=AUDIO_LIMIT, on_created=record)
+                if row['kind'] == 'gallery':
+                    data = download_gallery_music(row['work_id'], temporary, headless=self.store.config.headless,
+                                                  cancelled=cancelled, max_bytes=AUDIO_LIMIT, on_created=record)
+                    mime = 'audio/mpeg'
+                else:
+                    data = extract_audio(self.store.file_path(source), temporary, cancelled=cancelled, max_bytes=AUDIO_LIMIT, on_created=record)
+                    mime = 'audio/mp4'
                 if cancelled():
                     raise WebError('INTERRUPTED')
                 if final.exists():
@@ -244,11 +260,13 @@ class AudioJobs:
                         with self.store.connection() as db:
                             db.execute('INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?)', (
                                 uuid.uuid4().hex, row['id'], str(final.relative_to(self.store.config.output_dir)), final.name,
-                                data['bytes'], data['sha256'], 'audio/mp4', None, None, data['duration']))
-                            db.execute("UPDATE jobs SET audio_state='success',audio_error=NULL,updated_at=? WHERE id=?", (time.time(), row['id']))
+                                data['bytes'], data['sha256'], mime, None, None, data['duration']))
+                            db.execute("UPDATE jobs SET audio_state='success',audio_error=NULL,audio_error_detail='{}',updated_at=? WHERE id=?", (time.time(), row['id']))
                         published = True
         except (LumaBoxError, WebError) as exc:
             error = exc.code if exc.code in AUDIO_ERRORS else 'AUDIO_FAILED'
+            if isinstance(exc, LumaBoxError) and exc.code in AUDIO_ERRORS:
+                detail = public_diagnostics(exc.diagnostics)
         except Exception:
             error = 'AUDIO_FAILED'
         finally:
@@ -260,7 +278,8 @@ class AudioJobs:
                     with self.store.connection() as db:
                         current = db.execute('SELECT audio_state FROM jobs WHERE id=?', (row['id'],)).fetchone()
                         status = 'cancelled' if current and current['audio_state'] == 'cancelling' else 'failed'
-                        db.execute('UPDATE jobs SET audio_state=?,audio_error=? WHERE id=?',
-                                   (status, None if status == 'cancelled' and clean else error if clean else 'CLEANUP_FAILED', row['id']))
+                        db.execute('UPDATE jobs SET audio_state=?,audio_error=?,audio_error_detail=? WHERE id=?',
+                                   (status, None if status == 'cancelled' and clean else error if clean else 'CLEANUP_FAILED',
+                                    json.dumps(detail if status == 'failed' and clean else {}), row['id']))
             self.store.storage.invalidate()
         return True
