@@ -57,3 +57,9 @@ Linux 候选目录为 `/home/dev/develop/lumabox-0.8.2-validation-20261018`，�
 云端入口仍为 `http://39.106.202.240/`，服务重启后用原密码重新登录即可。域名 HTTPS、低优先级 VPN 兼容与用户暂缓的稳定性工作没有扩展。
 
 服务器备份包含 before / after-start / after-validation 快照。本地忽略目录 `Downloaded/music-family-policy/` 保存固定 bundle、部署 / 回退脚本、Windows 与 Linux JUnit、最终快照、本地备份、原始 MP3 下载副本、真实公网结果与 Chromium 截图。密码、Cookie、签名地址、数据库及媒体没有提交 Git。
+
+## 用户云端验收与 GitHub 推送授权
+
+用户反馈“云端验证通过，github推送”，确认云端体验并授权发布本版源码。用户没有说明此次使用的设备或逐项操作范围，按云端体验验收记录，既有浏览器自动化边界继续保留。
+
+验收后只补充文档，运行时代码与已通过完整回归的 `3bc17b0` 一致，云端继续运行该提交。GitHub 沿用 `feat/gallery-music` 功能分支向 `main` 创建 PR 的流程，合并由用户操作。
